@@ -62,6 +62,9 @@ async function boot(){
       onBizResultCallback:()=>{}, getInstance:()=>{}, slideStyle:{width:320,height:40}, language:"cn",
       onError:(err)=>{msg("安全验证出错: "+((err&&err.message)||""),"err");}
     });
+    await new Promise(r=>setTimeout(r,2500));
+    const trigger=document.getElementById("__acHiddenTrigger"); if(trigger) trigger.click();
+    msg("请完成下方滑块验证 →","warn");
     const t0=Date.now(); await (function poll(){ if(window.__acReceiptSent||Date.now()-t0>180000)return; return new Promise(r=>setTimeout(r,500)).then(poll); })();
     msg("滑块验证通过 ✓","ok");
   } else {
