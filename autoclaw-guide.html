@@ -40,8 +40,14 @@ const APP_ID="100003";
 const APP_KEY="38d2391985e2369a5fb8227d8e6cd5e5";
 const PRODUCT="autoclaw";
 const GLOBAL_HOST="https://autoglm-api.autoglm.ai";
-const DEVICE_ID = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,"0")).join("");
-const REDIRECT_URI="http://localhost:18432/auth/callback-"+vendor;
+// ⚠️ device_id 必须与插件侧「换 token」时使用的完全一致。
+// 插件通过 ?device_id=... 传入；若缺失（旧链接/手输）才本地随机生成。
+// 两边不一致会导致上游对不上 → oauth-login 报 631001「登录失败,请重新尝试」。
+const DEVICE_ID = (params.get("device_id") || "").trim()
+  || Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,"0")).join("");
+// navigate_uri 同样以插件传入为准（默认与官方白名单一致）
+const REDIRECT_URI = (params.get("redirect_uri") || "").trim()
+  || ("http://localhost:18432/auth/callback-"+vendor);
 function md5Sign(ts){ try { return (typeof md5==="function") ? md5(APP_ID+"&"+ts+"&"+APP_KEY) : ""; } catch(e){ return ""; } }
 function bizHeaders(){ const ts=String(Math.floor(Date.now()/1000)); return {"Content-Type":"application/json","Accept":"*/*","User-Agent":"AutoClaw/1.18.1 (mac-arm64)","X-Version":"1.18.1","X-Product":PRODUCT,"X-Auth-Appid":APP_ID,"X-Auth-TimeStamp":ts,"X-Auth-Sign":md5Sign(ts),"X-Lang":"zh-CN","X-Channel":"AutoClaw4","Origin":"http://localhost:18432","Referer":"http://localhost:18432/"}; }
 function msg(m,cls){const e=document.getElementById("msg");e.textContent=m;e.className="msg "+(cls||"");}
