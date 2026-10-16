@@ -81,9 +81,9 @@ echo '{ "signin": true, "signinHour": null, "signinOnUsage": false }' > ~/.confi
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。
 - **`device_id` 是 OAuth 的会话绑定键**：引导页调 `{vendor}-oauth-url` 与插件调 `{vendor}-oauth-login` 必须用同一个值。方式2 已由插件通过 `?device_id=` 透传；手工复制旧链接（或误用方式1 的页面）会导致 `631001 抱歉,登录失败,请重新尝试`。
 
-### 出站请求的四道上游闸（v0.7.0 全部对齐）
+### 出站请求的五道上游闸（v0.8.0 全部对齐）
 
-本插件的对话出站请求必须同时满足上游四条硬约束，任一条不满足都会被拒（且错误形态各不相同，极易误判成「登录失效」）：
+本插件的对话出站请求必须同时满足上游五条硬约束，任一条不满足都会被拒（且错误形态各不相同，极易误判成「登录失效」）：
 
 | # | 约束 | 不满足时 |
 |---|---|---|
@@ -91,6 +91,9 @@ echo '{ "signin": true, "signinHour": null, "signinOnUsage": false }' > ~/.confi
 | 2 | **不发** `X-Harness-Type: zcode` | 403 `pay-view/810001` 或 406 空体 |
 | 3 | `X-Tm` 只发 `win`/`mac`，**绝不发 `linux`** | 403 `{"message":"forbidden"}` |
 | 4 | body 的 `max_tokens` 要么缺省、要么 ≥10000 | 小正整数（256/4096/8192…）→ 406 空体 |
+| 5 | **首条 system/developer 消息的正文**必须以 `You are a personal assistant running inside OpenClaw.` **开头**，且含 `## Tooling` 段，且不含外来 harness 身份句 | 只有身份句 → 403 `pay-view`；无 system / 中性句 / 外来身份句 → 406 空体 |
+
+第 5 条是**经 magpie 网关转发时唯一的 406 来源**：网关会注入自己的 system 提示词，而该提示词不满足上游白名单；插件直调（无网关注入）则天然满足 —— 这正是「插件自测 200、经网关 406」的分界。v0.8.0 起插件在出站前自动规范化：**前置** OpenClaw 身份前缀（客户端自己的提示词逐字保留在后），并把 `ZCode` / `Claude Code` / `Codex` / `DeepSeek Harness` 等外来身份句**改写**成中性说法（忽略大小写、长匹配优先、幂等、只动 system/developer）。
 
 另有两条模型标识纪律：`X-Request-Model` 必须发**带前缀的路由 ID**（`zaicoding_glm-5.3`），`body.model` 必须发**剥前缀的目录名**（`glm-5.3`）。发反了上游回 `400 非法模型`。
 
@@ -115,7 +118,8 @@ ssh -N -L 18432:127.0.0.1:18432 user@server
 | `630014 抱歉,审核失败,请重新尝试` | 阿里云滑块回执无效/过期 | 回引导页重新过滑块后马上继续 |
 | `400001 请求数据有问题` | 缺少 `ali_captcha_verify_param` 或参数不全 | 用全新打开的引导页，勿手工拼参数 |
 | 测试模型 405 / 看到 `<!doctypehtml>` WAF 页 | 出站 `User-Agent` 不是 `AutoClaw/*` | 升级到 ≥ v0.7.0（已强制设置 UA） |
-| 测试模型 406 空响应体 | `max_tokens` 是小正整数，或误发 `X-Harness-Type: zcode` | 升级到 ≥ v0.7.0（已自动抬 `max_tokens`、已移除该头） |
+| 测试模型 406 空响应体 | ① `max_tokens` 是小正整数；② 误发 `X-Harness-Type: zcode`；③ **经网关时 system 首句不合白名单** | 升级到 ≥ v0.8.0（已自动抬 `max_tokens`、已移除该头、已自动规范化 system 提示词） |
+| **插件直调 200、经 magpie 网关 406** | 网关注入了自己的 system 提示词，未满足上游白名单（第 5 道闸） | 升级到 ≥ v0.8.0（出站前自动前置 OpenClaw 身份前缀 + 改写外来身份句） |
 | 测试模型 403 `pay-view` / `810001` | 上游高峰期限流或额度提示（**非** bug） | 稍后重试；持续出现说明该账号免费额度已用尽 |
 | 测试模型 `400 非法模型` | 发了无前缀的模型名，或选了已下架模型 | 升级到 ≥ v0.7.0（已按真实目录收敛模型表） |
 

@@ -339,3 +339,152 @@ test("USER_AGENT：必须是 AutoClaw/* 形态（运行时默认 UA 会被上游
   assert.match(USER_AGENT, /^AutoClaw\//, `实际 ${USER_AGENT}`);
   assert.ok(!/bun|node|undici/i.test(USER_AGENT), "不得含运行时名");
 });
+
+// ---- system 提示词规范化（第 7 道闸：上游对首条 system 做逐字指纹）-----------
+
+test("IDENTITY_PREFIX：必须含身份句 + `## Tooling` 段（缺一段就 403 pay-view）", () => {
+  const { IDENTITY_LINE, IDENTITY_PREFIX } = _internal;
+  assert.equal(IDENTITY_LINE, "You are a personal assistant running inside OpenClaw.");
+  assert.ok(IDENTITY_PREFIX.startsWith(IDENTITY_LINE), "前缀必须以身份句开头");
+  assert.ok(IDENTITY_PREFIX.includes("## Tooling"), "前缀必须含 ## Tooling 段");
+  assert.ok(IDENTITY_PREFIX.endsWith("\n"), "前缀应以换行收尾（便于拼原文）");
+});
+
+test("normalizeSystemPrompt：首条已经是 system → 前缀拼进它，客户端提示词逐字保留在后", () => {
+  const { normalizeSystemPrompt, IDENTITY_PREFIX } = _internal;
+  const body = { messages: [{ role: "system", content: "You are magpie gateway." }, { role: "user", content: "hi" }] };
+  assert.equal(normalizeSystemPrompt(body), true);
+  const sys = body.messages[0];
+  assert.equal(sys.role, "system");
+  assert.ok(sys.content.startsWith(IDENTITY_PREFIX), "前缀应拼在最前");
+  assert.ok(sys.content.endsWith("You are magpie gateway."), "客户端原文应逐字保留在后");
+  assert.equal(body.messages[1].content, "hi", "user 消息一字不动");
+});
+
+test("normalizeSystemPrompt：首条不是 system → 在最前插一条带前缀的 system（不重排其余）", () => {
+  const { normalizeSystemPrompt, IDENTITY_PREFIX, IDENTITY_LINE } = _internal;
+  const body = {
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "system", content: "late system" },
+    ],
+  };
+  assert.equal(normalizeSystemPrompt(body), true);
+  assert.equal(body.messages.length, 3, "应插入一条，不替换");
+  assert.equal(body.messages[0].role, "system");
+  assert.ok(body.messages[0].content.startsWith(IDENTITY_LINE));
+  // 原本的 system 保持原位（只被改写了身份句，位置不动）
+  assert.equal(body.messages[2].role, "system");
+  assert.equal(body.messages[1].content, "hello");
+});
+
+test("normalizeSystemPrompt：外来身份句被改写成中性说法（ZCode / Claude Code / Codex / DeepSeek Harness）", () => {
+  const { normalizeSystemPrompt } = _internal;
+  const cases = [
+    ["You are ZCode, an interactive coding agent", /You are an interactive coding agent/i],
+    ["You are Claude Code, Anthropic's official CLI tool for Claude.", /You are a coding assistant/i],
+    ["You are Codex, based on GPT-5.", /You are a coding agent/i],
+    ["You are an AI agent powered by DeepSeek Harness.", /a local coding harness/i],
+  ];
+  for (const [text, want] of cases) {
+    const body = { messages: [{ role: "system", content: text }, { role: "user", content: "x" }] };
+    normalizeSystemPrompt(body);
+    const out = body.messages[0].content;
+    assert.match(out, want, `${text} 应被改写`);
+    assert.ok(!/ZCode|Claude Code|DeepSeek Harness|You are Codex/i.test(out.split("## Tooling")[1] ?? ""), `${text} 改写后仍含产品名：${out}`);
+  }
+});
+
+test("normalizeSystemPrompt：改写忽略 ASCII 大小写（闸门自己不敏感）", () => {
+  const { normalizeSystemPrompt } = _internal;
+  const body = { messages: [{ role: "system", content: "you are ZCODE" }, { role: "user", content: "x" }] };
+  normalizeSystemPrompt(body);
+  const out = body.messages[0].content;
+  assert.ok(!/zcode/i.test(out.split("## Tooling")[1] ?? ""), `大小写变体也应被改写：${out}`);
+});
+
+test("normalizeSystemPrompt：长匹配优先（先命中长句，短句不留残渣）", () => {
+  const { normalizeSystemPrompt } = _internal;
+  const body = { messages: [{ role: "system", content: "You are a coding agent running in the Codex CLI tool" }, { role: "user", content: "x" }] };
+  normalizeSystemPrompt(body);
+  const out = body.messages[0].content;
+  assert.ok(!/Codex/i.test(out), `不应残留 Codex：${out}`);
+  assert.ok(/terminal CLI tool/.test(out), `应命中长句（terminal CLI tool）：${out}`);
+});
+
+test("normalizeSystemPrompt：幂等（正文已以身份句开头则只改写、不再前缀）", () => {
+  const { normalizeSystemPrompt, IDENTITY_LINE, IDENTITY_PREFIX } = _internal;
+  const body = { messages: [{ role: "system", content: `${IDENTITY_PREFIX}\nYou are Codex.` }, { role: "user", content: "x" }] };
+  normalizeSystemPrompt(body);
+  const once = body.messages[0].content;
+  assert.equal(once.split(IDENTITY_LINE).length - 1, 1, "身份句只应出现一次");
+  const body2 = { messages: [{ role: "system", content: once }, { role: "user", content: "x" }] };
+  normalizeSystemPrompt(body2);
+  assert.equal(body2.messages[0].content, once, "二次调用应逐字不变");
+});
+
+test("normalizeSystemPrompt：只动 system/developer，user/assistant/tool 一律不碰", () => {
+  const { normalizeSystemPrompt } = _internal;
+  const body = {
+    messages: [
+      { role: "assistant", content: "You are Claude Code" },
+      { role: "user", content: "You are ZCode" },
+      { role: "tool", content: "You are Codex" },
+      { role: "system", content: "plain" },
+    ],
+  };
+  normalizeSystemPrompt(body);
+  // 插入的 system 前缀在 index 0，其余整体后移
+  assert.equal(body.messages[1].content, "You are Claude Code");
+  assert.equal(body.messages[2].content, "You are ZCode");
+  assert.equal(body.messages[3].content, "You are Codex");
+});
+
+test("normalizeSystemPrompt：developer 角色同样享受白名单待遇", () => {
+  const { normalizeSystemPrompt, IDENTITY_PREFIX } = _internal;
+  const body = { messages: [{ role: "developer", content: "You are Codex" }, { role: "user", content: "x" }] };
+  normalizeSystemPrompt(body);
+  assert.equal(body.messages.length, 2, "developer 已是首条，不该再插");
+  assert.ok(body.messages[0].content.startsWith(IDENTITY_PREFIX));
+  assert.ok(!/Codex/i.test(body.messages[0].content));
+});
+
+test("normalizeSystemPrompt：content 是文本 part 数组 → 前缀拼进第一个文本 part", () => {
+  const { normalizeSystemPrompt, IDENTITY_PREFIX } = _internal;
+  const body = {
+    messages: [
+      { role: "system", content: [{ type: "text", text: "sys body" }] },
+      { role: "user", content: "x" },
+    ],
+  };
+  normalizeSystemPrompt(body);
+  const parts = body.messages[0].content;
+  assert.ok(Array.isArray(parts));
+  assert.ok(parts[0].text.startsWith(IDENTITY_PREFIX));
+  assert.ok(parts[0].text.endsWith("sys body"));
+});
+
+test("normalizeSystemPrompt：messages 缺失/非数组 → 不动（交给上游报格式错）", () => {
+  const { normalizeSystemPrompt } = _internal;
+  assert.equal(normalizeSystemPrompt({}), false);
+  assert.equal(normalizeSystemPrompt({ messages: "nope" }), false);
+  assert.equal(normalizeSystemPrompt(null), false);
+});
+
+test("normalizeSystemPrompt：返回值反映是否真的改写（拼网关注入的 body 必须触发 true）", () => {
+  const { normalizeSystemPrompt } = _internal;
+  const injected = { model: "auto", messages: [{ role: "system", content: "You are magpie." }, { role: "user", content: "hi" }] };
+  assert.equal(normalizeSystemPrompt(injected), true);
+  const already = { messages: [{ role: "system", content: _internal.IDENTITY_PREFIX }, { role: "user", content: "hi" }] };
+  assert.equal(normalizeSystemPrompt(already), false, "已合规的 body 不应被判为改动");
+});
+
+test("findIgnoreAsciiCase / replaceAllIgnoreAsciiCase：字节级大小写折叠 + 全量替换", () => {
+  const { findIgnoreAsciiCase, replaceAllIgnoreAsciiCase } = _internal;
+  assert.equal(findIgnoreAsciiCase("xxABCDyy", "abcd"), 2);
+  assert.equal(findIgnoreAsciiCase("hello", "zzz"), null);
+  assert.equal(findIgnoreAsciiCase("中文ABCD", "abcd"), Buffer.byteLength("中文", "utf8"));
+  assert.equal(replaceAllIgnoreAsciiCase("aAaA", "aa", "-"), "--");
+  assert.equal(replaceAllIgnoreAsciiCase("nope", "aa", "-"), null);
+  assert.equal(replaceAllIgnoreAsciiCase("中文ABC中文abc", "abc", "X"), "中文X中文X");
+});
