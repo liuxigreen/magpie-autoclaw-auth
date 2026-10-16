@@ -78,6 +78,18 @@ echo '{ "signin": true, "signinHour": null, "signinOnUsage": false }' > ~/.confi
 - refresh token 与 AutoClaw 桌面端**共用会互踢**（双方都轮换），插件账号请勿同时在桌面端登录。
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。
 
+## 远程部署说明（magpie 跑在服务器上）
+
+本插件的网页 OAuth 需要在插件进程所在机器上监听本地端口（官方 client 白名单 18432/19654/19723/53699），并跳转到 `http://127.0.0.1:<port>/`。如果 magpie 部署在远程服务器，而浏览器打开在你本地电脑上，这个 localhost 会指向你本机，导致“连接被拒绝”。
+
+推荐用 SSH 端口转发把服务器的端口映射到本机（保持登录期间不要关）：
+
+```sh
+ssh -N -L 18432:127.0.0.1:18432 用户名@服务器    # Linux / macOS
+```
+
+然后在服务器 shell 执行 `magpie plugin login autoclaw`，浏览器打开的 127.0.0.1:18432 就会经隧道落到服务器的引导页；登录完成再按 Ctrl+C 关闭隧道即可。手机号登录（`autoclaw-cn`）不经过本地 web 引导，不受这个限制。
+
 ## 开发与测试
 
 ```sh
