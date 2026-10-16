@@ -783,7 +783,7 @@ async function startLocalOAuth(vendor) {
   });
 
   return {
-    url: "", // 由 callback 里自行开浏览器（本地引导页），宿主不重复打开
+    url: `http://127.0.0.1:${fixedPort}/`, // 宿主自动打开；未自动打开时按 instructions 手动访问
     instructions: `已打开本地引导页（未自动打开时手动访问 http://127.0.0.1:${fixedPort}/ ）：请完成滑块验证并登录授权，完成后自动返回 magpie。`,
     method: "auto",
     async callback() {
