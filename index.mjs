@@ -1,7 +1,7 @@
 /**
  * magpie-autoclaw-auth —— magpie/OpenCode provider 插件：AutoClaw（智谱）。
  *
- * 双供应商：autoclaw（国际，Google/z.ai 网页 OAuth）/ autoclaw-cn（国内，手机验证码）。
+ * 单供应商：autoclaw（国际版，Google / z.ai 邮箱网页 OAuth 登录）。
  * 功能：登录、token 自动轮换、积分余额（auth.usage）、原生每日签到（auth.checkin，
  * magpie ≥ v0.1.1083）、旧链路自动补签（默认关）。
  *
@@ -153,12 +153,6 @@ async function callEnvelope(path, { method = "GET", body, base }) {
     throw new Error(`AutoClaw ${path.split("?")[0]} non-envelope response (HTTP ${response.status}): ${text.slice(0, 200)}`);
   }
   return { status: response.status, code: parsed.code, msg: parsed.msg, data: parsed.data };
-}
-
-/** 验证码必须按数字发送（服务端按类型校验，字符串 → 400001）。 */
-function codeValue(code) {
-  const s = (code ?? "").trim();
-  return /^\d+$/.test(s) ? Number(s) : s;
 }
 
 /** token 响应 → magpie 凭据字段（不含 type——由 magpie 按 oauth 方式包装）。 */
@@ -411,7 +405,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         const auth = await getAuth();
         if (auth?.type !== "oauth" || !auth.access) return {};
         const accessToken = bareToken(auth.access);
-        const hosts = providerId === "autoclaw-cn" ? [CN_HOST, GLOBAL_HOST] : [GLOBAL_HOST, CN_HOST];
+        const hosts = [GLOBAL_HOST, CN_HOST]; // CN_HOST 仅作 401/403 换侧与 refresh 备选
 
         return {
           baseURL: homeHost,
@@ -457,7 +451,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
       async usage(getAuth) {
         const auth = await getAuth();
         if (auth?.type !== "oauth" || !auth.access) return { error: "未登录", windows: [] };
-        const hosts = providerId === "autoclaw-cn" ? [CN_HOST, GLOBAL_HOST] : [GLOBAL_HOST, CN_HOST];
+        const hosts = [GLOBAL_HOST, CN_HOST];
         const token = bareToken(auth.access);
         const cfg = signinConfig(options);
         try {
@@ -518,7 +512,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         const auth = await getAuth();
         if (auth?.type !== "oauth" || !auth.access) throw new Error("未登录");
         const token = bareToken(auth.access);
-        const hosts = providerId === "autoclaw-cn" ? [CN_HOST, GLOBAL_HOST] : [GLOBAL_HOST, CN_HOST];
+        const hosts = [GLOBAL_HOST, CN_HOST];
 
         // 先查任务状态：区分「无签到活动」（inactive）与「查询失败」（throw → failed 重试）
         let task = null;
@@ -553,61 +547,6 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
     },
   });
 }
-
-// ---------------------------------------------------------------------------
-// 登录方式：国内手机验证码
-// ---------------------------------------------------------------------------
-
-const phoneSmsMethod = {
-  type: "oauth",
-  label: "AutoClaw 手机验证码登录（国内）",
-  async authorize(inputs) {
-    const phone = String(inputs?.phone ?? "").trim();
-    // authorize 失败必须 throw（返回 {type:"failed"} 会被宿主当 "auto" 分支无参调 callback()）。
-    if (!/^1\d{10}$/.test(phone)) {
-      throw new Error("请输入 11 位手机号（不带 +86）");
-    }
-    const deviceId = newDeviceId();
-    const send = await callEnvelope("/userapi/v1/agent-send-code", {
-      method: "POST",
-      body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone }),
-      base: CN_HOST,
-    });
-    if (send.code !== 0) {
-      throw new Error(`发送验证码失败: ${send.msg ?? `code ${send.code}`}`);
-    }
-    return {
-      url: "",
-      instructions: `验证码已发送到 ${phone.slice(0, 3)}****${phone.slice(-4)} 的短信，请输入收到的验证码。`,
-      method: "code",
-      async callback(code) {
-        const res = await callEnvelope("/userapi/v1/agent-login/", {
-          method: "POST",
-          body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone, code: codeValue(code) }),
-          base: CN_HOST,
-        });
-        if (res.code !== 0 || !res.data?.access_token) {
-          return { type: "failed", error: `登录失败: ${res.msg ?? `code ${res.code}`}` };
-        }
-        const t = tokenFields(res.data);
-        // GUI 显示名：拉 user-profile 取昵称/手机号（登录响应的 user_name 常为空 → 显示「已登录」）
-        const profile = await fetchUserProfile(t.access, CN_HOST);
-        const displayName = accountDisplayName(profile, phone);
-        return {
-          type: "success",
-          ...t,
-          accountId: displayName,
-          email: displayName,
-          uid: nonEmptyString(res.data.user_id) ?? undefined,
-        };
-      },
-    };
-  },
-  prompts: [
-    { type: "text", key: "phone", message: "手机号（11 位，不带 +86）", placeholder: "13800138000",
-      validate: (v) => (/^1\d{10}$/.test(String(v ?? "").trim()) ? undefined : "11 位手机号") },
-  ],
-};
 
 // ---------------------------------------------------------------------------
 // 登录方式：国际网页 OAuth（本地完整实现：滑块 + 授权 + 回调捕获）
@@ -971,17 +910,9 @@ export const AutoclawAuthPlugin = makeAutoclawPlugin({
   loginMethod: overseaOAuthMethod,
 });
 
-/** provider "autoclaw-cn"：国内版（手机验证码）。 */
-export const AutoclawCnAuthPlugin = makeAutoclawPlugin({
-  providerId: "autoclaw-cn",
-  providerName: "AutoClaw 国内 (Zhipu)",
-  homeHost: CN_HOST,
-  loginMethod: phoneSmsMethod,
-});
-
 /** 测试辅助（magpie/OpenCode 不会把它当插件调用）。 */
 export const _internal = {
-  md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
+  md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinConfig, checkinOutcome, refreshTokens,
   fetchUserProfile, accountDisplayName,
   guidePageHtml, callbackPageHtml,
