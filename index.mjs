@@ -36,29 +36,110 @@ const APP_KEY = "38d2391985e2369a5fb8227d8e6cd5e5";
 const PRODUCT = "autoclaw";
 const CHANNEL = "AutoClaw4";
 const CLIENT_VERSION = "1.18.1";
-const PLATFORM_TM = process.platform === "darwin" ? "mac" : process.platform === "win32" ? "win" : "linux";
+/**
+ * 平台标识（源实现 `platformTm()` / agent2api `adapter.rs::platform_tm()`）。
+ *
+ * 🔴 **linux 必须回落成 `win`，不能发 `linux`** —— 这是本插件在服务器上跑
+ * 必然失败的直接原因。上游只认官方桌面端存在的平台（Windows / macOS）；
+ * 实测 `X-Tm: linux` 被拒（403 `{"message":"forbidden"}` / 405 / 406），
+ * 而 `win` / `mac` / 不带该头都放行。进一步二分：上游只拒绝**恰好等于
+ * `linux`** 的值，`windows` / `other` 也都放行。
+ *
+ * 依据：agent2api `providers/autoclaw/adapter.rs` 模块头第 4 条「平台绑定」
+ * （2026-10-08，#115/PR #116）与 `platform_tm()` 实现：
+ *   `if cfg!(target_os = "macos") { "mac" } else { "win" }`
+ * 服务端/Docker 镜像恒在 Linux 上，容器里不存在「真实桌面平台」可选，
+ * 故非 macOS 一律回落 `win`。
+ */
+const PLATFORM_TM = process.platform === "darwin" ? "mac" : "win";
 const USER_AGENT = `AutoClaw/${CLIENT_VERSION} (${PLATFORM_TM}-arm64)`;
 
 const GLOBAL_HOST = "https://autoglm-api.autoglm.ai";
-const CN_HOST = "https://autoglm-api.zhipuai.cn";
+// 🔴 国内版是「加速域」，不是主站：实测 autoglm-api.zhipuai.cn 一律 410000/401，
+// 正确基址是 autoglm-acceleration-api.zhipuai.cn（来源：agent2api 的 region.rs）。
+const CN_HOST = "https://autoglm-acceleration-api.zhipuai.cn";
 
-const CHAT_PATH = "/autoclaw-proxy/proxy/autoclaw/v1/chat/completions";
+// 🔴 路径不带 `/v1`：upstreamPath = '/chat/completions'（源实现 forwardModelRequest）。
+// 带 `/v1` 会被上游当成未知路径 → 403 pay-view / 406 空体（实测对照见诊断报告）。
+const CHAT_PATH = "/autoclaw-proxy/proxy/autoclaw/chat/completions";
 const WALLETS_PATH = `/agent-assetmgr/api/v2/wallets?biz_app_id=${PRODUCT}`;
 
 const OAUTH_EXPIRY_SKEW_MS = 10 * 60 * 1000;
 const FALLBACK_EXPIRES_IN_S = 5 * 3600;
 
-/** 模型清单：键 = magpie 里显示的 id；值里的 id = 上游接受的 routeModelId。 */
+/**
+ * 模型清单：键 = magpie 里显示的 id（客户端选它）；值里的 id = 上游 **routeModelId**
+ * （`X-Request-Model` 要发的那个，带通道前缀）。
+ *
+ * 🔴 两个 id 不能混：`X-Request-Model` 必须带路由前缀（`zaicoding_` / `zai_`），
+ * `body.model` 必须是剥掉前缀的名字。发反了上游一律 `400 非法模型`（实测：
+ * `X-Request-Model: glm-5.3` → 400；`zaicoding_glm-5.3` → 200）。
+ *
+ * 本表**按上游真实目录收敛**（权威来源：`GET .../autoclaw-model-config`，
+ * 2026-10-16 在 DMIT 实测，国内/国际版各 4 条）：
+ *   zai_auto(文本+图) / zai_auto-fast / zaicoding_glm-5.3 / zai_glm-5.3-flash
+ * 旧表里的 `zai_glm-5-turbo`、`tdpsk_deepseek-v4-*` 实测全部 `400 非法模型`
+ * （上游已下架），保留它们只会让用户选中一个必然报错的模型 —— 故移除。
+ *
+ * 注意 provider 的 `api` 基址为裸 host，SDK 会拼 `/v1/chat/completions`；
+ * 实际出站路径由 loader 的 `CHAT_PATH` 覆写，与此表无关。
+ */
 function autoclawModels() {
   return {
-    "zai_auto": { name: "GLM Auto (路由)", id: "zai_auto", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
-    "zai_auto-fast": { name: "GLM Auto Fast", id: "zai_auto-fast", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
-    "zai_glm-5.3-flash": { name: "GLM-5.3 Flash", id: "zai_glm-5.3-flash", limit: { context: 1000000, output: 32000 }, reasoning: true, tool_call: true },
-    "zai_glm-5-turbo": { name: "GLM-5 Turbo", id: "zai_glm-5-turbo", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
-    "zaicoding_glm-5.3": { name: "GLM-5.3 Coding", id: "zaicoding_glm-5.3", limit: { context: 1000000, output: 131072 }, reasoning: true, tool_call: true },
-    "tdpsk_deepseek-v4-flash-202605": { name: "DeepSeek V4 Flash", id: "tdpsk_deepseek-v4-flash-202605", limit: { context: 1000000, output: 384000 }, reasoning: true, tool_call: true },
-    "tdpsk_deepseek-v4-pro-202606": { name: "DeepSeek V4 Pro", id: "tdpsk_deepseek-v4-pro-202606", limit: { context: 1000000, output: 384000 }, reasoning: true, tool_call: true },
+    "zai_auto": { name: "Auto", id: "zai_auto", limit: { context: 1048576, output: 131072 }, reasoning: true, tool_call: true },
+    "zai_auto-fast": { name: "Auto Fast", id: "zai_auto-fast", limit: { context: 1048576, output: 393216 }, reasoning: true, tool_call: true },
+    "zaicoding_glm-5.3": { name: "GLM-5.3", id: "zaicoding_glm-5.3", limit: { context: 1048576, output: 307200 }, reasoning: true, tool_call: true },
+    "zai_glm-5.3-flash": { name: "GLM-5.3-Flash", id: "zai_glm-5.3-flash", limit: { context: 1048576, output: 131072 }, reasoning: true, tool_call: true },
   };
+}
+
+/** 路由前缀表（剥前缀用；**顺序有意义**：先 `zaicoding_` 再 `zai_`）。 */
+const ROUTE_PREFIXES = ["zaicoding_", "zai_"];
+
+/** 剥掉已知路由前缀：`zaicoding_glm-5.3` → `glm-5.3`。 */
+function stripRoutePrefix(routeId) {
+  for (const p of ROUTE_PREFIXES) {
+    if (routeId.startsWith(p)) return routeId.slice(p.length);
+  }
+  return routeId;
+}
+
+/**
+ * 客户端给的模型名 → 上游路由 ID（`X-Request-Model`）。
+ *
+ * 客户端可以是三种写法，统一解析到**规范 routeId**（依据 agent2api
+ * `providers/autoclaw/models.rs::resolve_model_route`）：
+ *   1. 路由 ID 本身（`zaicoding_glm-5.3`）→ 原样；
+ *   2. 目录名 / 展示名（`glm-5.3` / `GLM-5.3-Flash`）→ 查表得规范 routeId；
+ *   3. 已带未知前缀的 `x_yyy` 形态 → 原样透传（上游自己认）。
+ * 都不中时回落 `zai_auto`（与源实现的非严格模式一致）。
+ *
+ * 🔴 为什么必须查表而不是「把 body.model 直接当路由 ID 发」：
+ * 那样会发成 `glm-5.3`（无前缀）→ 上游 `400 非法模型` —— 这正是旧版
+ * 「测试模型失败」的第二个成因（实测见诊断报告第三节）。
+ */
+function resolveRouteId(clientModel) {
+  const name = String(clientModel ?? "").trim();
+  if (!name) return "zai_auto";
+  const lower = name.toLowerCase();
+
+  // 1) 路由 ID 本身（含大小写变体）：表里的 id 就是 routeId
+  for (const [id, meta] of Object.entries(autoclawModels())) {
+    if (id.toLowerCase() === lower) return meta.id;
+  }
+  // 2) 目录名 / 展示名：剥前缀后比对
+  const stripped = stripRoutePrefix(lower);
+  for (const meta of Object.values(autoclawModels())) {
+    if (stripRoutePrefix(meta.id).toLowerCase() === stripped) return meta.id;
+  }
+  // 2b) 展示名（`GLM-5.3` / `Auto Fast`）
+  for (const meta of Object.values(autoclawModels())) {
+    if (String(meta.name).toLowerCase() === lower) return meta.id;
+  }
+  // 3) 已带未知前缀的合法路由形态：原样透传（上游自己判定）
+  if (/^[a-z][a-z0-9]*_[A-Za-z0-9._:-]{1,127}$/.test(name)) return name;
+  // 4) 未知名字：回落默认路由（源实现非严格模式）
+  return "zai_auto";
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +184,39 @@ function bizHeaders(accessToken) {
 
 function nonEmptyString(v) {
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
+ * 上游对出站 body 的 `max_tokens` 有预校验：**小正整数一律 406 空响应体**。
+ *
+ * 实测（agent2api `providers/autoclaw/adapter.rs::normalize_max_tokens` 的结论，
+ * 本仓库在 DMIT 上按同法复现，逐格一致）：
+ *   max_tokens 缺省   → 200
+ *   max_tokens=256    → 406 空体
+ *   max_tokens=4096   → 406 空体
+ *   max_tokens=8192   → 406 空体
+ *   max_tokens=10000  → 200 ✓
+ *   max_tokens=131072 → 200 ✓
+ * 下界落在 8192（拒）与 10000（过）之间，取实测安全值 10000。
+ *
+ * 绝大多数 OpenAI 客户端 / SDK 默认带 `max_tokens`（4096 / 2048 / 1024…），
+ * 所以「某些客户端 100% 406 且响应体为空」的真正变量就是它 —— 而不是提示词
+ * 或登录态。本函数只抬「小正整数」这一种形态，其余原样交上游：
+ *   - 缺省 / null / 非正整数 / 浮点 / 字符串 → 不动（不凭猜测注入或改写）；
+ *   - `0` / 负数 → 不动（那是请求方语义错误，交上游报错）；
+ *   - `max_completion_tokens` → 一字不动（实测不参与该校验）。
+ *
+ * @param {object} body 已解析的请求体（就地修改）
+ * @returns {boolean} 是否真的改写了（调用方据此决定要不要重建 init）
+ */
+function normalizeMaxTokens(body) {
+  const MIN = 10_000;
+  if (!body || typeof body !== "object") return false;
+  const v = body.max_tokens;
+  if (typeof v !== "number" || !Number.isInteger(v)) return false;
+  if (v <= 0 || v >= MIN) return false;
+  body.max_tokens = MIN;
+  return true;
 }
 
 /** 剥掉 token 上误带的 "Bearer " 前缀（老凭据/代理回包可能带；7863 侧同样的容错）。 */
@@ -412,9 +526,26 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
           async fetch(input, init) {
             const headers = new Headers(init?.headers);
             headers.set("X-Authorization", `Bearer ${accessToken}`);
+            // 🔴 User-Agent 必须显式设置：本家 chat 端点对 UA 有指纹要求，
+            // 运行时默认 UA（bun 的 `Bun/x.y.z` 等）会被上游判成非法客户端
+            // → **405 + 阿里云 WAF HTML 页**（不是 406 空体，也不是 403 pay-view）。
+            // 实测（DMIT，同请求只改 UA）：
+            //   UA=null（bun 默认）               -> 405 ✗
+            //   UA="AutoClaw/1.18.1 (win-arm64)"  -> 200 ✓
+            //   UA="AutoClaw/1.18.1"              -> 200 ✓
+            // ⚠️ 不设它时 bun 会用自己的默认 UA，Headers 里根本看不到该键，
+            //    但线上请求带的是 bun 标识 —— 本插件因此长期稳定 405。
+            headers.set("User-Agent", USER_AGENT);
             headers.set("X-Client-Type", "pc");
             headers.set("X-Product", PRODUCT);
-            headers.set("X-Harness-Type", "zcode");
+            // 🔴 绝不发 X-Harness-Type: zcode —— 上游 2026-09-22 起对本家客户端做指纹
+            // 甄别：带 `zcode` 稳定 403 pay-view(810001) 或 406 空体；不带、或换成
+            // `autoclaw` 都是 200。实测对照（同账号/同模型/同请求体，只改这一个头）：
+            //   zcode    -> 406 空体
+            //   不带      -> 200 ✓
+            //   autoclaw -> 200 ✓
+            // 详见 agent2api `providers/autoclaw/adapter.rs` 模块头「上游 2026-09-22
+            // 起的两道闸」第 1 条，以及本仓库诊断报告第三节。
             headers.set("X-Tm", PLATFORM_TM);
             headers.set("X-Version", CLIENT_VERSION);
             headers.set("X-Lang", "zh-CN");
@@ -423,27 +554,49 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
             headers.delete("Authorization");
 
             let routeModel = "";
+            let outInit = init;
             try {
-              const body = JSON.parse(String(init?.body ?? "{}"));
-              routeModel = String(body.model ?? "");
+              const raw = JSON.parse(String(init?.body ?? "{}"));
+              // 🔴 X-Request-Model 必须发**路由 ID**（带 zaicoding_/zai_ 前缀），
+              // 不能直接拿 body.model 发 —— 后者是无前缀的目录名，上游回 400 非法模型。
+              routeModel = resolveRouteId(raw.model);
+              // 🔴 上游对出站 body 的 max_tokens 有预校验（agent2api #58/#69，本仓库实测复现）：
+              // 小正整数（30/256/4096/8192…）一律 406 空体；缺省或 ≥10000 才 200。
+              // 绝大多数客户端默认带 4096，必须把「小正整数」抬到安全下限，否则必然 406。
+              if (normalizeMaxTokens(raw)) {
+                outInit = { ...init, body: JSON.stringify(raw) };
+              }
             } catch { /* 保持空 */ }
             if (routeModel) headers.set("X-Request-Model", routeModel);
             headers.set("X-Request-Id", randomHex(16));
 
             const tryFetch = (host) =>
-              fetch(`${host}${CHAT_PATH}`, { ...init, headers, signal: init?.signal });
+              fetch(`${host}${CHAT_PATH}`, { ...outInit, headers, signal: outInit?.signal });
+
+            // 🔴 403 不能一律当「登录失效」：上游的 403 有三种形态，只有第一种才是
+            // 真失效，另两种是**业务态**，换 host 重试既无意义、还会把真实原因
+            // 伪装成「登录失效」让用户白折腾：
+            //   ① 403 + `{"message":"forbidden"}`（1KB 内、约 0.9s）→ 平台绑定
+            //      不符（X-Tm 平台/账号绑定不一致）—— 换 host 无用，原样返回。
+            //   ② 403 + `{"action":{"kind":"pay-view"},"code":810001,…, image_url}`
+            //      → 额度/高峰期提示 —— 业务响应，原样返回给客户端（别吞）。
+            //   ③ 403 + `{"code":810002,"message":"请求过于频繁…"}` → 限流，原样返回。
+            //   ④ 401 → 才可能是 token 真的失效，值得换 host 再试一次。
+            const isAuthFailure = (res) => res.status === 401;
 
             const res1 = await tryFetch(hosts[0]);
-            if (res1.status !== 401 && res1.status !== 403) return res1;
-            const res2 = await tryFetch(hosts[1]);
-            if (res2.status === 401 || res2.status === 403) {
-              try { res2.body?.cancel?.(); } catch {}
-              return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效（两个 host 均拒绝该 token）", type: "invalid_request_error" } }), {
-                status: 401,
-                headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" },
-              });
+            if (isAuthFailure(res1)) {
+              const res2 = await tryFetch(hosts[1]);
+              if (isAuthFailure(res2)) {
+                try { res2.body?.cancel?.(); } catch {}
+                return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效（两个 host 均拒绝该 token）", type: "invalid_request_error" } }), {
+                  status: 401,
+                  headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" },
+                });
+              }
+              return res2;
             }
-            return res2;
+            return res1;
           },
         };
       },
@@ -1026,9 +1179,11 @@ export const AutoclawAuthPlugin = makeAutoclawPlugin({
 export const _internal = {
   md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinConfig, checkinOutcome, refreshTokens,
-  fetchUserProfile, accountDisplayName,
+  fetchUserProfile, accountDisplayName, normalizeMaxTokens,
+  resolveRouteId, stripRoutePrefix, autoclawModels,
   guidePageHtml, callbackPageHtml, remoteGuideHtml,
   manualOauthMethod, overseaOAuthMethod,
+  CHAT_PATH, CN_HOST, PLATFORM_TM, USER_AGENT,
 };
 
 function remoteGuideHtml(vendor, deviceId) {
