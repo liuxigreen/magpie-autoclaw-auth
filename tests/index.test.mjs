@@ -162,3 +162,80 @@ test("插件工厂：config() 注册供应商/模型，auth/provider 钩子齐�
   await plugin.config(cfg);
   assert.equal(cfg.provider.autoclaw.api, "https://autoglm-api.autoglm.ai");
 });
+
+// ---- 回归：手动粘贴登录的 device_id 透传（v0.6.3 修复 631001） -------------------
+// 症状：方式2 引导页自己随机生成 device_id，插件 callback() 却用另一个 device_id
+// 调 oauth-login → 上游会话对不上 → 631001「抱歉,登录失败,请重新尝试」。
+// 修复：插件把 device_id（及 redirect_uri）拼进引导页 URL，两边必须一致。
+
+test("manualOauthMethod.authorize：URL 携带 device_id / redirect_uri / vendor", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  assert.equal(out.method, "code");
+  const u = new URL(out.url);
+  assert.equal(u.host, "liuxigreen.github.io");
+  assert.match(u.pathname, /autoclaw-guide\.html$/);
+  assert.equal(u.searchParams.get("vendor"), "google");
+  const dev = u.searchParams.get("device_id");
+  assert.ok(dev && dev.length >= 32, `device_id 必须透传，实得: ${dev}`);
+  assert.equal(u.searchParams.get("redirect_uri"), "http://localhost:18432/auth/callback-google");
+});
+
+test("manualOauthMethod.authorize：zai 分支同样透传（redirect 后缀随 vendor）", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "zai" });
+  const u = new URL(out.url);
+  assert.equal(u.searchParams.get("vendor"), "zai");
+  assert.ok(u.searchParams.get("device_id"));
+  assert.equal(u.searchParams.get("redirect_uri"), "http://localhost:18432/auth/callback-zai");
+});
+
+test("manualOauthMethod.authorize：每次调用 device_id 均不同（会话隔离）", async () => {
+  const { manualOauthMethod } = _internal;
+  const a = new URL((await manualOauthMethod.authorize({ vendor: "google" })).url).searchParams.get("device_id");
+  const b = new URL((await manualOauthMethod.authorize({ vendor: "google" })).url).searchParams.get("device_id");
+  assert.notEqual(a, b);
+});
+
+test("remoteGuideHtml：device_id 内联进页面（自渲染引导页）", () => {
+  const { remoteGuideHtml } = _internal;
+  const did = "deadbeef".repeat(8);
+  const html = remoteGuideHtml("google", did);
+  assert.match(html, /^data:text\/html;base64,/);
+  const body = Buffer.from(html.split(",")[1], "base64").toString("utf8");
+  assert.ok(body.includes(`const DEVICE_ID="${did}"`), "device_id 应内联为指定值，而非随机生成");
+});
+
+test("manualOauthMethod.callback：非法/空粘贴内容给出明确失败，不抛异常", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const r1 = await out.callback("");
+  assert.equal(r1.type, "failed");
+  assert.match(r1.error, /为空/);
+});
+
+// ---- 回归：粘贴内容诊断（把「登录失败」变成可操作提示） ----------------------
+
+test("callback：粘了错误回调（含 error=）给出明确提示，不发请求", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const r = await out.callback("http://localhost:18432/auth/callback-google?error=access_denied&state=x");
+  assert.equal(r.type, "failed");
+  assert.match(r.error, /授权被拒绝|错误回调/);
+});
+
+test("callback：粘了无 code 的 URL 给出明确提示", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const r = await out.callback("https://liuxigreen.github.io/magpie-autoclaw-auth/autoclaw-guide.html?vendor=google");
+  assert.equal(r.type, "failed");
+  assert.match(r.error, /没有 code/);
+});
+
+test("callback：裸 code 形态可疑时提前拦住", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const r = await out.callback("ab");
+  assert.equal(r.type, "failed");
+  assert.match(r.error, /形态可疑/);
+});

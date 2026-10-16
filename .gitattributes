@@ -1,0 +1,6 @@
+# 统一用 LF 存储——插件在 Linux 服务器上运行，CRLF 会污染 shell 脚本与 HTML 内联脚本
+* text=auto eol=lf
+*.mjs text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md text eol=lf
