@@ -582,7 +582,7 @@ const manualOauthMethod = {
   async authorize(inputs) {
     const vendor = inputs?.vendor === "zai" ? "zai" : "google";
     const deviceId = newDeviceId();
-    const url = remoteGuideHtml(vendor, deviceId);
+    const url = "https://cdn.jsdelivr.net/gh/liuxigreen/magpie-autoclaw-auth@main/autoclaw-guide.html?vendor=" + (inputs?.vendor === "zai" ? "zai" : "google");
     const redirectUri = "http://localhost:18432/auth/callback-" + vendor;
     return {
       url,
