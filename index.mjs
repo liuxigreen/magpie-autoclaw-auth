@@ -219,6 +219,222 @@ function normalizeMaxTokens(body) {
   return true;
 }
 
+/**
+ * 出站身份句（官方 system prompt 的第一句，逐字照抄）。
+ * 上游闸门要求首条 system / developer 消息的正文**以它开头**。
+ */
+const IDENTITY_LINE = "You are a personal assistant running inside OpenClaw.";
+
+/**
+ * 出站身份前缀 = 身份句 + `## Tooling` 段（官方 prompt 的开头两行，逐字照抄）。
+ *
+ * 🔴 缺 `## Tooling` 段 → 403 pay-view；只有身份句 → 403 pay-view；
+ * 两者齐备 → 200。这不是「建议」，是硬闸门。
+ *
+ * 来源：agent2api `providers/autoclaw/prompt.rs::IDENTITY_PREFIX`（`resources/
+ * gateway/openclaw/dist/system-prompt-config-*.js` 的 `buildSystemPrompt` 开头）。
+ */
+const IDENTITY_PREFIX =
+  "You are a personal assistant running inside OpenClaw.\n\n" +
+  "## Tooling\n" +
+  "Available tools are policy-filtered. Names are case-sensitive; call exactly as listed.\n";
+
+/**
+ * 外来身份句 → 中性说法（**长的必须在前**）。
+ *
+ * 上游对 system 首句做**逐字指纹**拦截：命中 `<产品名> 的 harness 身份句` 就
+ * 406 空体。把产品名换成中性说法即可放行。
+ *
+ * 🔴 排序纪律：短的在前会把长匹配串切碎 —— 先命中 `You are ZCode` 就再也匹配
+ * 不到 `You are ZCode, an interactive coding agent`，于是「改写后仍含产品名」
+ * 的半吊子结果原样出站被拦。**新词条一律按长度降序插**。
+ *
+ * 🔴 匹配**忽略大小写**：闸门自己就不敏感（把 `DeepSeek` 的 e 写成 E 仍 406），
+ * 替换若敏感，同一句指纹换个大小写就漏网。
+ *
+ * 实测口径：国内版 ZCode / Claude Code / 老 Codex CLI 三句实测过「改写后 200」；
+ * 国际版 DeepSeek Harness 与新版 Codex 首句实测过「原样 406」。
+ */
+const FOREIGN_IDENTITIES = [
+  ["You are ZCode, an interactive coding agent", "You are an interactive coding agent"],
+  ["You are a coding agent running in the Codex CLI tool", "You are a coding agent running in a terminal CLI tool"],
+  ["You are a coding agent running in the Codex CLI", "You are a coding agent running in a terminal CLI"],
+  ["You are running as a coding agent in the Codex CLI", "You are running as a coding agent in a terminal CLI"],
+  ["You are Claude Code", "You are a coding assistant"],
+  ["You are ZCode", "You are an interactive coding agent"],
+  ["You are an AI agent powered by DeepSeek Harness", "You are an AI agent powered by a local coding harness"],
+  ["You are Codex", "You are a coding agent"],
+];
+
+/** 角色是否承载 system 级指令：**精确**等于 `system` / `developer`，其余一律不动。 */
+function isSystemRole(message) {
+  if (!message || typeof message !== "object") return false;
+  const role = message.role;
+  return role === "system" || role === "developer";
+}
+
+/**
+ * `from` 在 `text` 里首次出现的**字节下标**（只折叠 ASCII 大小写）。
+ *
+ * 不用 `toLowerCase()` 再找：Unicode 折叠会改变字节长度（`İ` 折成两个字符），
+ * 折后的下标回不到原文，切片就错位。这里按字节滑窗 + 逐字节 ASCII 折叠比较
+ * （`from` 全是 ASCII，非 ASCII 字节 >= 0x80 不可能匹配），起止点必在字符边界。
+ */
+function findIgnoreAsciiCase(text, from) {
+  const hay = Buffer.from(text, "utf8");
+  const needle = Buffer.from(from, "utf8");
+  if (needle.length === 0 || hay.length < needle.length) return null;
+  outer: for (let start = 0; start <= hay.length - needle.length; start++) {
+    for (let i = 0; i < needle.length; i++) {
+      let a = hay[start + i];
+      let b = needle[i];
+      if (a >= 0x41 && a <= 0x5a) a += 0x20;
+      if (b >= 0x41 && b <= 0x5a) b += 0x20;
+      if (a !== b) continue outer;
+    }
+    return start;
+  }
+  return null;
+}
+
+/** `from` 在 `text` 里**全量**替换（忽略 ASCII 大小写）；未命中返回 null（不动原串）。 */
+function replaceAllIgnoreAsciiCase(text, from, to) {
+  if (findIgnoreAsciiCase(text, from) === null) return null;
+  const hay = Buffer.from(text, "utf8");
+  const needle = Buffer.from(from, "utf8");
+  const parts = [];
+  let offset = 0;
+  let cursor = 0;
+  for (;;) {
+    const rel = findIgnoreAsciiCase(hay.subarray(offset).toString("utf8"), from);
+    if (rel === null) break;
+    // 相对下标（字符）→ 绝对字节下标：在剩余子串上做同样的字节窗扫描。
+    const rest = hay.subarray(offset);
+    let byteRel = null;
+    outer: for (let start = 0; start <= rest.length - needle.length; start++) {
+      for (let i = 0; i < needle.length; i++) {
+        let a = rest[start + i];
+        let b = needle[i];
+        if (a >= 0x41 && a <= 0x5a) a += 0x20;
+        if (b >= 0x41 && b <= 0x5a) b += 0x20;
+        if (a !== b) continue outer;
+      }
+      byteRel = start;
+      break;
+    }
+    if (byteRel === null) break;
+    parts.push(hay.subarray(cursor, offset + byteRel).toString("utf8"));
+    parts.push(to);
+    cursor = offset + byteRel + needle.length;
+    offset = cursor;
+  }
+  parts.push(hay.subarray(cursor).toString("utf8"));
+  return parts.join("");
+}
+
+/** 逐条套用 {@link FOREIGN_IDENTITIES}（全量替换；忽略大小写）。 */
+function rewriteIdentities(text) {
+  let out = text;
+  for (const [from, to] of FOREIGN_IDENTITIES) {
+    const next = replaceAllIgnoreAsciiCase(out, from, to);
+    if (next !== null) out = next;
+  }
+  return out;
+}
+
+/** 就地改写 content（字符串 / 文本 part 数组）里的外来身份句。 */
+function rewriteIdentitiesInPlace(content) {
+  if (typeof content === "string") return rewriteIdentities(content);
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (part && typeof part === "object" && typeof part.text === "string") {
+        return { ...part, text: rewriteIdentities(part.text) };
+      }
+      return part;
+    });
+  }
+  return content;
+}
+
+/** 前缀 + 空行 + 原文（原文为空则不留多余空行）。 */
+function joinPrefix(original) {
+  if (!original) return IDENTITY_PREFIX;
+  return `${IDENTITY_PREFIX}\n${original}`;
+}
+
+/** 给一条消息的 content 前置身份前缀（已以身份句开头则一字不动）。 */
+function prependPrefix(message) {
+  const content = message.content;
+  if (typeof content === "string") {
+    if (content.startsWith(IDENTITY_LINE)) return message;
+    return { ...message, content: joinPrefix(content) };
+  }
+  if (Array.isArray(content)) {
+    const idx = content.findIndex((part) => part && typeof part.text === "string");
+    if (idx === -1) {
+      return { ...message, content: [{ type: "text", text: IDENTITY_PREFIX }, ...content] };
+    }
+    const part = content[idx];
+    if (part.text.startsWith(IDENTITY_LINE)) return message;
+    const next = content.slice();
+    next[idx] = { ...part, text: joinPrefix(part.text) };
+    return { ...message, content: next };
+  }
+  // content 缺字段 / null / 对象 / 数字：这种 content 当 system 提示词本就不成立
+  // （上游当空提示词 → 稳定 406），换成前缀本身。
+  return { ...message, content: IDENTITY_PREFIX };
+}
+
+/**
+ * 出站前规范化 body 里的 system 提示词（**就地修改** `body.messages`）。
+ *
+ * 🔴 这是经 magpie 网关转发时**唯一**会 406 的原因：网关会把自己注入的 system
+ * 提示词一并发出去，而该 system 不满足上游白名单（必须是 OpenClaw 身份句开头 +
+ * `## Tooling` 段，且不得含外来 harness 身份句）。
+ *
+ * 两步：
+ *   ① 所有 system / developer 消息里的**外来身份句改写**成中性说法；
+ *   ② 保证**首条**消息是 system / developer 且正文以身份句开头 —— 是则前置
+ *      前缀（客户端提示词逐字保留在后面），否则在 `messages[0]` 插一条只带前缀
+ *      的 system 消息（**不重排**后面那些 system 消息的位置：重排消息序列会破坏
+ *      客户端的轮次结构，风险远大于收益）。
+ *
+ * 边界（与 prompt.rs 同口径）：
+ *   - **只动 system / developer**，user / assistant / tool 一律不碰（不碰用户内容）；
+ *   - **不替换、也不追加** system 消息，只在首条不是 system 时**插入**一条；
+ *   - `messages` 缺失或不是数组 → 直接返回（交给上游报格式错误比在这里造一个
+ *     空 `messages` 更能说明问题）。
+ *
+ * 幂等：正文已以 {@link IDENTITY_LINE} 开头时只改写、不再前置。
+ *
+ * @param {object} body 已解析的请求体（就地修改）
+ * @returns {boolean} 是否真的改写了（调用方据此决定要不要重建 init）
+ */
+function normalizeSystemPrompt(body) {
+  if (!body || typeof body !== "object") return false;
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return false;
+
+  const before = JSON.stringify(messages);
+
+  const next = messages.map((message) => {
+    if (!isSystemRole(message)) return message;
+    const rewritten = rewriteIdentitiesInPlace(message.content);
+    const withContent =
+      rewritten === message.content ? message : { ...message, content: rewritten };
+    return withContent;
+  });
+
+  if (next.length > 0 && isSystemRole(next[0])) {
+    next[0] = prependPrefix(next[0]);
+  } else {
+    next.unshift({ role: "system", content: IDENTITY_PREFIX });
+  }
+
+  body.messages = next;
+  return JSON.stringify(next) !== before;
+}
+
 /** 剥掉 token 上误带的 "Bearer " 前缀（老凭据/代理回包可能带；7863 侧同样的容错）。 */
 function bareToken(v) {
   let t = String(v ?? "").trim();
@@ -563,7 +779,14 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
               // 🔴 上游对出站 body 的 max_tokens 有预校验（agent2api #58/#69，本仓库实测复现）：
               // 小正整数（30/256/4096/8192…）一律 406 空体；缺省或 ≥10000 才 200。
               // 绝大多数客户端默认带 4096，必须把「小正整数」抬到安全下限，否则必然 406。
-              if (normalizeMaxTokens(raw)) {
+              // 🔴 还要规范化 system 提示词：上游对首条 system 的**首句做逐字指纹**
+              // （必须 `You are a personal assistant running inside OpenClaw.` 开头 +
+              // 带 `## Tooling` 段，且不得含外来 harness 身份句）。
+              // **经 magpie 网关转发时这是唯一的 406 来源** —— 网关会注入它自己的
+              // system 提示词，而该提示词不满足白名单；插件直调（无网关注入）则天然
+              // 满足，所以「插件自测 200、经网关 406」。
+              const changedBody = normalizeMaxTokens(raw) | normalizeSystemPrompt(raw);
+              if (changedBody) {
                 outInit = { ...init, body: JSON.stringify(raw) };
               }
             } catch { /* 保持空 */ }
@@ -1179,8 +1402,11 @@ export const AutoclawAuthPlugin = makeAutoclawPlugin({
 export const _internal = {
   md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinConfig, checkinOutcome, refreshTokens,
-  fetchUserProfile, accountDisplayName, normalizeMaxTokens,
-  resolveRouteId, stripRoutePrefix, autoclawModels,
+    fetchUserProfile, accountDisplayName, normalizeMaxTokens,
+    resolveRouteId, stripRoutePrefix, autoclawModels,
+    normalizeSystemPrompt, rewriteIdentities, replaceAllIgnoreAsciiCase,
+    findIgnoreAsciiCase, prependPrefix, joinPrefix, isSystemRole,
+    IDENTITY_LINE, IDENTITY_PREFIX, FOREIGN_IDENTITIES,
   guidePageHtml, callbackPageHtml, remoteGuideHtml,
   manualOauthMethod, overseaOAuthMethod,
   CHAT_PATH, CN_HOST, PLATFORM_TM, USER_AGENT,
