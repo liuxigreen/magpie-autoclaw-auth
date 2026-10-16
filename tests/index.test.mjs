@@ -239,3 +239,103 @@ test("callback：裸 code 形态可疑时提前拦住", async () => {
   assert.equal(r.type, "failed");
   assert.match(r.error, /形态可疑/);
 });
+
+// ---- 回归：三个真 bug（2026-10-16「测试模型失败」）----------------------------
+// 依据：https://github.com/aimod-cc/agent2api 的 providers/autoclaw/*
+// 每条都在 DMIT 上按同法实测复现过（见诊断报告第三节）。
+
+test("CHAT_PATH：不带 /v1（带上会被上游 403 pay-view / 406 空体）", () => {
+  const { CHAT_PATH } = _internal;
+  assert.equal(CHAT_PATH, "/autoclaw-proxy/proxy/autoclaw/chat/completions");
+  assert.ok(!CHAT_PATH.includes("/v1/"), "路径不得含 /v1");
+});
+
+test("CN_HOST：国内版用加速域（主站 autoglm-api.zhipuai.cn 一律 401/410000）", () => {
+  const { CN_HOST } = _internal;
+  assert.equal(CN_HOST, "https://autoglm-acceleration-api.zhipuai.cn");
+  assert.ok(!/^https:\/\/autoglm-api\.zhipuai\.cn$/.test(CN_HOST), "不能是主站域");
+});
+
+test("normalizeMaxTokens：小正整数抬到 10000（上游对小 max_tokens 一律 406 空体）", () => {
+  const { normalizeMaxTokens } = _internal;
+  for (const v of [30, 256, 1024, 4096, 8192]) {
+    const b = { max_tokens: v };
+    assert.equal(normalizeMaxTokens(b), true, `${v} 应被抬升`);
+    assert.equal(b.max_tokens, 10000);
+  }
+});
+
+test("normalizeMaxTokens：缺省 / ≥10000 / 非正整数一律不动", () => {
+  const { normalizeMaxTokens } = _internal;
+  const untouched = [
+    {},                       // 缺省：不凭空注入
+    { max_tokens: 10000 },    // 恰好下限
+    { max_tokens: 131072 },   // 大值
+    { max_tokens: 0 },        // 0：交上游
+    { max_tokens: -1 },       // 负数
+    { max_tokens: 1.5 },      // 浮点
+    { max_tokens: "4096" },   // 字符串
+    { max_tokens: null },     // null
+  ];
+  for (const b of untouched) {
+    const before = JSON.stringify(b);
+    assert.equal(normalizeMaxTokens(b), false, `${before} 不应被改写`);
+    assert.equal(JSON.stringify(b), before);
+  }
+  // max_completion_tokens 不参与该校验，一字不动
+  const b = { max_tokens: 4096, max_completion_tokens: 30 };
+  assert.equal(normalizeMaxTokens(b), true);
+  assert.equal(b.max_completion_tokens, 30);
+});
+
+// ---- 回归：模型路由 ID（X-Request-Model 必须带前缀）--------------------------
+
+test("resolveRouteId：目录名/展示名/路由 ID 三种写法都解析到规范 routeId", () => {
+  const { resolveRouteId } = _internal;
+  // 目录名
+  assert.equal(resolveRouteId("glm-5.3"), "zaicoding_glm-5.3");
+  assert.equal(resolveRouteId("glm-5.3-flash"), "zai_glm-5.3-flash");
+  // 展示名（含大小写变体）
+  assert.equal(resolveRouteId("GLM-5.3"), "zaicoding_glm-5.3");
+  assert.equal(resolveRouteId("GLM-5.3-Flash"), "zai_glm-5.3-flash");
+  assert.equal(resolveRouteId("Auto Fast"), "zai_auto-fast");
+  // 路由 ID 本身
+  assert.equal(resolveRouteId("zaicoding_glm-5.3"), "zaicoding_glm-5.3");
+  assert.equal(resolveRouteId("zai_auto"), "zai_auto");
+});
+
+test("resolveRouteId：绝不给 X-Request-Model 发无前缀名（否则上游 400 非法模型）", () => {
+  const { resolveRouteId } = _internal;
+  for (const name of ["glm-5.3", "glm-5.3-flash", "auto", "auto-fast", "GLM-5.3"]) {
+    const r = resolveRouteId(name);
+    assert.match(r, /^(zai|zaicoding)_/, `${name} 应解析为带前缀的路由 ID，实际 ${r}`);
+  }
+});
+
+test("resolveRouteId：未知名字回落 zai_auto；空值同样", () => {
+  const { resolveRouteId } = _internal;
+  assert.equal(resolveRouteId(""), "zai_auto");
+  assert.equal(resolveRouteId("   "), "zai_auto");
+  assert.equal(resolveRouteId("gpt-4o"), "zai_auto");
+  assert.equal(resolveRouteId("claude-3-opus"), "zai_auto");
+});
+
+test("模型表：只留上游真实目录的 4 个（已下架的 turbo / deepseek 必须移除）", () => {
+  const { autoclawModels } = _internal;
+  const ids = Object.keys(autoclawModels());
+  assert.deepEqual(ids.sort(), ["zai_auto", "zai_auto-fast", "zai_glm-5.3-flash", "zaicoding_glm-5.3"].sort());
+  assert.ok(!ids.some((i) => i.includes("turbo")), "turbo 已下架，不应再广告");
+  assert.ok(!ids.some((i) => i.startsWith("tdpsk_")), "deepseek 已下架，不应再广告");
+});
+
+test("PLATFORM_TM：绝不发 linux（上游只认 win/mac，linux 被拒）", () => {
+  const { PLATFORM_TM } = _internal;
+  assert.ok(["win", "mac"].includes(PLATFORM_TM), `PLATFORM_TM 只能是 win/mac，实际 ${PLATFORM_TM}`);
+  assert.notEqual(PLATFORM_TM, "linux");
+});
+
+test("USER_AGENT：必须是 AutoClaw/* 形态（运行时默认 UA 会被上游 405 拒）", () => {
+  const { USER_AGENT } = _internal;
+  assert.match(USER_AGENT, /^AutoClaw\//, `实际 ${USER_AGENT}`);
+  assert.ok(!/bun|node|undici/i.test(USER_AGENT), "不得含运行时名");
+});
