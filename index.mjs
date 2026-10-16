@@ -576,14 +576,47 @@ const overseaOAuthMethod = {
 
 const MANUAL_REDIRECT_URI = "http://localhost:18432/auth/callback-";
 
+/** 判断粘贴串是否是 OAuth「错误回调」（Google 拒绝授权等），而非成功回调。 */
+function isErrorRedirect(raw, code) {
+  if (code) return false;
+  if (/[?&#]error=/.test(raw)) return true;
+  return /(access_denied|cancel|denied|unauthorized)/i.test(raw);
+}
+
+/**
+ * 把上游 login 的失败码翻译成可操作提示。
+ * 631001 = 上游换 token 失败：最常见原因是「授权绑定的 device_id」与「兑换用的 device_id」不一致
+ * （即用户点了方式1 或手工复制了不带 device_id 的旧引导页链接），其次才是 code 过期/已使用。
+ */
+function loginErrorMessage(res, vendor) {
+  const code = res?.code;
+  const msg = res?.msg ?? `code ${code}`;
+  if (code === 631001) {
+    return "登录失败: "
+      + "上游拒绝了这次兑换（631001）。最可能的原因：授权用的 device_id 与当前会话不一致 —— "
+      + "请从 magpie 面板重新点「AutoClaw 授权链接登录」，用它弹出的那一条链接完成授权（不要用收藏/旧链接或方式1 的页面），"
+      + "然后在 10 分钟内粘贴返回地址；若仍失败，换 " + (vendor === "zai" ? "Google" : "z.ai") + " 账号再试。";
+  }
+  if (code === 630014) return `登录失败: 安全验证未通过（630014）。请回引导页重新完成阿里云滑块后立刻继续授权。`;
+  if (code === 400001) return `登录失败: 请求参数不完整（400001）。请确认是全新打开的引导页，并粘贴带 code 的完整回调 URL。`;
+  if (code === 500009) return `登录失败: 上游服务异常（500009）。稍后重试即可。`;
+  return `登录失败: ${msg}`;
+}
+
 const manualOauthMethod = {
   type: "oauth",
   label: "AutoClaw 授权链接登录（本地页打不开时用，手动粘贴）",
   async authorize(inputs) {
     const vendor = inputs?.vendor === "zai" ? "zai" : "google";
     const deviceId = newDeviceId();
-    const url = "https://liuxigreen.github.io/magpie-autoclaw-auth/autoclaw-guide.html?vendor=" + (inputs?.vendor === "zai" ? "zai" : "google");
+    // 🔴 device_id 必须随引导页传给浏览器侧：引导页拿它向 {vendor}-oauth-url 发起授权，
+    // callback() 里又用同一个 deviceId 调 {vendor}-oauth-login 换 token。
+    // 两者一旦不同，上游会话对不上，login 必报 631001「登录失败,请重新尝试」。
     const redirectUri = "http://localhost:18432/auth/callback-" + vendor;
+    const url = "https://liuxigreen.github.io/magpie-autoclaw-auth/autoclaw-guide.html"
+      + "?vendor=" + encodeURIComponent(vendor)
+      + "&device_id=" + encodeURIComponent(deviceId)
+      + "&redirect_uri=" + encodeURIComponent(redirectUri);
     return {
       url,
       instructions: "在本页完成滑块验证并完成官方 Google / z.ai 登录。登录成功后浏览器会跳到 http://localhost:18432/... 并显示“无法访问”——属正常：把地址栏里的完整 URL 粘贴到下一步输入框。",
@@ -599,16 +632,31 @@ const manualOauthMethod = {
         } catch { /* 非完整 URL，走正则提取 */ }
         if (!code) { const m = raw.match(/[?&]code=([^&#\s]+)/); if (m) code = m[1]; }
         if (!state) { const m = raw.match(/[?&]state=([^&#\s]+)/); if (m) state = m[1]; }
+        // 诊断必须早于「裸 code 兜底」：否则整条 URL 会被误当成 code。
+        if (isErrorRedirect(raw, code)) {
+          return { type: "failed", error:
+            "授权被拒绝或链接不完整：粘贴的是错误回调（含 error / 无 code）。请回引导页重新完成授权，"
+            + "并粘贴「地址栏里带 code=... 的那条 http://localhost:18432/... 完整 URL」。" };
+        }
+        if (/^https?:\/\//i.test(raw) && !code) {
+          return { type: "failed", error:
+            "这条 URL 里没有 code 参数。请确认粘的是授权完成后跳转的那条地址（示例："
+            + `http://localhost:18432/auth/callback-${vendor}?code=xxxx&state=yyyy ），而不是引导页或授权页地址。` };
+        }
         if (!code) code = raw; // 用户直接粘了裸 code
         try { code = decodeURIComponent(code); } catch { /* 原样 */ }
         try { state = decodeURIComponent(state); } catch { /* 原样 */ }
+        if (!/^[\w\-.\/~+=%]{8,}$/.test(code)) {
+          return { type: "failed", error:
+            `提取到的 code 形态可疑（${code.slice(0, 24)}…）。请粘完整 URL，不要只截取片段。` };
+        }
         const res = await callEnvelope(`/userapi/overseasv1/${vendor}-oauth-login`, {
           method: "POST",
           body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, code, state, navigate_uri: redirectUri }),
           base: GLOBAL_HOST,
         });
         if (res.code !== 0 || !res.data?.access_token) {
-          return { type: "failed", error: `登录失败: ${res.msg ?? `code ${res.code}`}` };
+          return { type: "failed", error: loginErrorMessage(res, vendor) };
         }
         const t = tokenFields(res.data);
         const profile = await fetchUserProfile(t.access, GLOBAL_HOST);
@@ -979,7 +1027,8 @@ export const _internal = {
   md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinConfig, checkinOutcome, refreshTokens,
   fetchUserProfile, accountDisplayName,
-  guidePageHtml, callbackPageHtml,
+  guidePageHtml, callbackPageHtml, remoteGuideHtml,
+  manualOauthMethod, overseaOAuthMethod,
 };
 
 function remoteGuideHtml(vendor, deviceId) {
