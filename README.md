@@ -2,14 +2,13 @@
 
 [magpie](https://usemagpie.ai) / [OpenCode](https://opencode.ai) provider 插件：**AutoClaw（智谱澳龙 / OpenClaw 云端账号体系）**。
 
-一个包注册两个供应商，按账号所在地分开登录、分开记额度：
+一个包注册供应商 `autoclaw`（国际版），用 Google / z.ai 邮箱网页 OAuth 登录：
 
 | 供应商 id | 登录方式 | 上游 host | 模型引用 |
 |---|---|---|---|
-| `autoclaw` | Google / z.ai 网页 OAuth | `autoglm-api.autoglm.ai` | `autoclaw/zai_auto` 等 |
-| `autoclaw-cn` | 手机验证码（+86） | `autoglm-api.zhipuai.cn` | `autoclaw-cn/zai_auto` 等 |
+| `autoclaw` | Google / z.ai 邮箱网页 OAuth | `autoglm-api.autoglm.ai` | `autoclaw/zai_auto` 等 |
 
-两个供应商都支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan / `tdpsk_` 豆包 DeepSeek）：
+支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan / `tdpsk_` 豆包 DeepSeek）：
 
 - `zai_auto` / `zai_auto-fast`（自动路由，推荐默认）
 - `zai_glm-5.3-flash` / `zai_glm-5-turbo`
@@ -19,12 +18,11 @@
 ## 安装
 
 ```sh
-magpie plugin add github:liuxigreen/magpie-autoclaw-auth   # 推荐：发布到 GitHub 后
+magpie plugin add github:<你的用户名>/magpie-autoclaw-auth   # 推荐：发布到 GitHub 后
 # 或本地调试：
 magpie plugin add ./magpie-autoclaw-auth
 
-magpie plugin login autoclaw          # Google / z.ai 网页登录（国际版）
-magpie plugin login autoclaw-cn       # 手机验证码（国内版）
+magpie plugin login autoclaw          # Google / z.ai 邮箱网页登录
 
 magpie provider test autoclaw zai_auto   # 连通测试
 magpie quota                              # 积分余额与签到状态
@@ -73,22 +71,18 @@ echo '{ "signin": true, "signinHour": null, "signinOnUsage": false }' > ~/.confi
 
 ## 已知行为
 
-- 手机号账号只认国内 host、z.ai/Google 账号只认国际 host；对话 fetch 已内置 401/403 自动换侧重试。
+- 对话 fetch 已内置 401/403 自动换侧重试（国内 host 仅作备用通道）。
 - 上游模型白名单随版本变化，模型下线时上游返回 `400 非法模型`（原样透传错误消息）。
 - refresh token 与 AutoClaw 桌面端**共用会互踢**（双方都轮换），插件账号请勿同时在桌面端登录。
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。
 
-## 远程部署说明（magpie 跑在服务器上）
+## 远程部署说明
 
-本插件的网页 OAuth 需要在插件进程所在机器上监听本地端口（官方 client 白名单 18432/19654/19723/53699），并跳转到 `http://127.0.0.1:<port>/`。如果 magpie 部署在远程服务器，而浏览器打开在你本地电脑上，这个 localhost 会指向你本机，导致“连接被拒绝”。
-
-推荐用 SSH 端口转发把服务器的端口映射到本机（保持登录期间不要关）：
+本插件的 OAuth 需要在插件进程本机监听官方白名单端口（18432 等）并在本机浏览器打开 `http://127.0.0.1:<port>/`。如果 magpie 跑在远程服务器且浏览器在你本机，必须用 SSH 端口转发：
 
 ```sh
-ssh -N -L 18432:127.0.0.1:18432 用户名@服务器    # Linux / macOS
+ssh -N -L 18432:127.0.0.1:18432 user@server
 ```
-
-然后在服务器 shell 执行 `magpie plugin login autoclaw`，浏览器打开的 127.0.0.1:18432 就会经隧道落到服务器的引导页；登录完成再按 Ctrl+C 关闭隧道即可。手机号登录（`autoclaw-cn`）不经过本地 web 引导，不受这个限制。
 
 ## 开发与测试
 

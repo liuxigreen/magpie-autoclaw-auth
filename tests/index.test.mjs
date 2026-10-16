@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _internal, AutoclawAuthPlugin, AutoclawCnAuthPlugin } from "../index.mjs";
+import { _internal, AutoclawAuthPlugin } from "../index.mjs";
 
 const {
-  md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken,
+  md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken,
   newDeviceId, signinConfig, checkinOutcome, accountDisplayName,
 } = _internal;
 
@@ -26,14 +26,6 @@ test("bareToken 剥掉任意层 Bearer 前缀", () => {
   assert.equal(bareToken("plain"), "plain");
   assert.equal(bareToken(null), "");
   assert.equal(bareToken(undefined), "");
-});
-
-test("codeValue 数字验证码转 number，其余原样", () => {
-  assert.equal(codeValue("123456"), 123456);
-  assert.strictEqual(codeValue("123456"), 123456); // 是 number 不是 string
-  assert.equal(codeValue(" 123 "), 123);
-  assert.equal(codeValue("12a45"), "12a45");
-  assert.equal(codeValue(""), "");
 });
 
 test("newDeviceId 是 64 位十六进制且每次不同", () => {
@@ -163,11 +155,6 @@ test("插件工厂：config() 注册供应商/模型，auth/provider 钩子齐�
   assert.ok(plugin.auth.methods[0].prompts.length > 0); // OAuth 引导页选项存在
   assert.equal(plugin.provider.id, "autoclaw");
 
-  const pluginCn = await AutoclawCnAuthPlugin({}, {});
-  const cfg2 = {};
-  await pluginCn.config(cfg2);
-  assert.equal(cfg2.provider["autoclaw-cn"].api, "https://autoglm-api.zhipuai.cn");
-  assert.equal(pluginCn.auth.provider, "autoclaw-cn");
   // 幂等：config 二次调用不覆盖既有配置
   await plugin.config(cfg);
   assert.equal(cfg.provider.autoclaw.api, "https://autoglm-api.autoglm.ai");
