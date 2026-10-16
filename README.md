@@ -22,7 +22,11 @@ magpie plugin add github:<你的用户名>/magpie-autoclaw-auth   # 推荐：发
 # 或本地调试：
 magpie plugin add ./magpie-autoclaw-auth
 
-magpie plugin login autoclaw          # Google / z.ai 邮箱网页登录
+# 登录方式二选一（GUI 里是两个按钮，CLI 会询问）：
+#  ①「AutoClaw 网页登录」——本机引导页（滑块 + 授权自动回跳），适合本机桌面环境
+#  ②「AutoClaw 授权链接登录」——打开上游授权页，登录后把跳转地址栏的完整 URL 粘贴回来，
+#     不伺服任何本地页面，适合 127.0.0.1 打不开的环境（远程服务器 / 代理劫持 / 浏览器与 magpie 不同机）
+magpie plugin login autoclaw          # Google / z.ai 邮箱登录
 
 magpie provider test autoclaw zai_auto   # 连通测试
 magpie quota                              # 积分余额与签到状态

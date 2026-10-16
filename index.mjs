@@ -382,7 +382,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
 
     auth: {
       provider: providerId,
-      methods: [loginMethod],
+      methods: [loginMethod, manualOauthMethod],
 
       async refresh(auth) {
         const t = await refreshTokens(bareToken(auth.refresh), [homeHost]);
@@ -558,6 +558,86 @@ const overseaOAuthMethod = {
   async authorize(inputs) {
     const vendor = inputs?.vendor === "zai" ? "zai" : "google";
     return await startLocalOAuth(vendor);
+  },
+  prompts: [
+    { type: "select", key: "vendor", message: "登录方式",
+      options: [
+        { label: "Google 账号", value: "google" },
+        { label: "z.ai 账号", value: "zai" },
+      ] },
+  ],
+};
+
+// ---------------------------------------------------------------------------
+// 登录方式：授权链接手动粘贴（官方 method:"code" 契约）——不伺服本地引导页，
+// 适合 127.0.0.1 打不开的环境（远程/代理/浏览器与 magpie 不同机）。
+// navigate_uri 仍须用官方 client 注册过的白名单端口（此处不监听，只与上游对齐）。
+// ---------------------------------------------------------------------------
+
+const MANUAL_REDIRECT_URI = "http://localhost:18432/auth/callback-";
+
+const manualOauthMethod = {
+  type: "oauth",
+  label: "AutoClaw 授权链接登录（本地页打不开时用，手动粘贴）",
+  async authorize(inputs) {
+    const vendor = inputs?.vendor === "zai" ? "zai" : "google";
+    const deviceId = newDeviceId();
+    const redirectUri = `${MANUAL_REDIRECT_URI}${vendor}`;
+    // 滑块预检：本方式不经过本地引导页，无法完成阿里滑块——启用时提前明确提示。
+    const cfg = await callEnvelope("/userapi/overseasv1/oauth-captcha-config", {
+      method: "POST", body: "{}", base: GLOBAL_HOST,
+    }).catch(() => ({ data: { enabled: false } }));
+    if (cfg?.data?.enabled) {
+      throw new Error("该账号当前要求安全验证（滑块），本方式无法完成——请改用「AutoClaw 网页登录」方式。");
+    }
+    const r = await callEnvelope(`/userapi/overseasv1/${vendor}-oauth-url`, {
+      method: "POST",
+      body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, navigate_uri: redirectUri }),
+      base: GLOBAL_HOST,
+    });
+    if (r.code !== 0 || !r.data) {
+      throw new Error(`获取授权页失败: ${r.msg ?? `code ${r.code}`}`);
+    }
+    const authorizeUrl = String(r.data.oauth_url ?? r.data.url ?? r.data.login_url ?? r.data.auth_url ?? r.data.verify_url ?? "");
+    if (!authorizeUrl) throw new Error("上游未返回授权页地址");
+    return {
+      url: authorizeUrl, // magpie 打开的是上游公网授权页，不依赖本地服务器
+      instructions: "在打开的页面完成登录授权（浏览器未自动打开时，手动访问 magpie 显示的链接）。完成后浏览器会跳到 http://localhost:18432/... 并显示无法访问——属正常现象；把地址栏里的完整 URL 复制下来，粘贴到下一步输入框即可。",
+      method: "code",
+      async callback(pasted) {
+        const raw = String(pasted ?? "").trim();
+        if (!raw) return { type: "failed", error: "粘贴内容为空" };
+        let code = "", state = "";
+        try {
+          const u = new URL(raw);
+          code = u.searchParams.get("code") ?? "";
+          state = u.searchParams.get("state") ?? "";
+        } catch { /* 非完整 URL，走正则提取 */ }
+        if (!code) { const m = raw.match(/[?&]code=([^&#\s]+)/); if (m) code = m[1]; }
+        if (!state) { const m = raw.match(/[?&]state=([^&#\s]+)/); if (m) state = m[1]; }
+        if (!code) code = raw; // 用户直接粘了裸 code
+        try { code = decodeURIComponent(code); } catch { /* 原样 */ }
+        try { state = decodeURIComponent(state); } catch { /* 原样 */ }
+        const res = await callEnvelope(`/userapi/overseasv1/${vendor}-oauth-login`, {
+          method: "POST",
+          body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, code, state, navigate_uri: redirectUri }),
+          base: GLOBAL_HOST,
+        });
+        if (res.code !== 0 || !res.data?.access_token) {
+          return { type: "failed", error: `登录失败: ${res.msg ?? `code ${res.code}`}` };
+        }
+        const t = tokenFields(res.data);
+        const profile = await fetchUserProfile(t.access, GLOBAL_HOST);
+        const displayName = accountDisplayName(profile, `${vendor} 账号`);
+        return {
+          type: "success",
+          ...t,
+          accountId: displayName,
+          email: displayName,
+          uid: nonEmptyString(res.data.user_id) ?? undefined,
+        };
+      },
+    };
   },
   prompts: [
     { type: "select", key: "vendor", message: "登录方式",
