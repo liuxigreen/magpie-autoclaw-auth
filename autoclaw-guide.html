@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>AutoClaw 登录</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#f5f6fa;display:flex;justify-content:center;padding:40px 16px;margin:0}
+ .card{background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.08);max-width:460px;width:100%;padding:32px}
+ h1{font-size:20px;margin:0 0 8px}
+ p.sub{color:#666;font-size:14px;margin:0 0 20px}
+ .step{font-size:14px;color:#333;margin:10px 0;display:flex;gap:8px;align-items:flex-start}
+ .step .n{background:#4f6ef7;color:#fff;border-radius:50%;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;flex:none}
+ #captchaBox{margin:16px 0;padding:16px;border:1px dashed #ccc;border-radius:10px;display:none}
+ #captchaEle{min-height:44px}
+ button.primary{background:#4f6ef7;color:#fff;border:none;border-radius:10px;padding:12px 22px;font-size:15px;cursor:pointer;width:100%;margin-top:16px}
+ button.primary:disabled{background:#b9c0f4;cursor:not-allowed}
+ .msg{font-size:13px;margin-top:10px;min-height:18px}
+ .msg.ok{color:#1a9c5b}.msg.err{color:#d43c3c}.msg.warn{color:#c98a00}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/js-md5@0.8.3/src/md5.js"></script>
+</head><body>
+<div class="card">
+ <h1 id="title">AutoClaw 登录</h1>
+ <p class="sub">全部步骤在本页完成（含阿里云滑块）；完成后浏览器可能跳到 localhost:18432 并打不开——属正常，把地址栏里含 <code>code</code> 的完整 URL 粘贴回 Magpie 即可。</p>
+ <div id="steps">
+  <div class="step"><span class="n">1</span><span id="stepCaptcha">检查安全验证…</span></div>
+  <div id="captchaBox"><div id="captchaEle"></div></div>
+  <div class="step"><span class="n">2</span><span id="stepAuth">跳转授权页完成登录</span></div>
+ </div>
+ <button class="primary" id="goBtn" disabled>继续授权</button>
+ <div class="msg" id="msg"></div>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+const vendor = (params.get("vendor") === "zai") ? "zai" : "google";
+const vendorName = vendor === "zai" ? "z.ai" : "Google";
+document.getElementById("title").textContent = "AutoClaw · " + vendorName + " 登录";
+document.getElementById("stepAuth").textContent = "跳转 " + vendorName + " 授权页完成登录";
+const APP_ID="100003";
+const APP_KEY="38d2391985e2369a5fb8227d8e6cd5e5";
+const PRODUCT="autoclaw";
+const GLOBAL_HOST="https://autoglm-api.autoglm.ai";
+const DEVICE_ID = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,"0")).join("");
+const REDIRECT_URI="http://localhost:18432/auth/callback-"+vendor;
+function md5Sign(ts){ try { return (typeof md5==="function") ? md5(APP_ID+"&"+ts+"&"+APP_KEY) : ""; } catch(e){ return ""; } }
+function bizHeaders(){ const ts=String(Math.floor(Date.now()/1000)); return {"Content-Type":"application/json","Accept":"*/*","User-Agent":"AutoClaw/1.18.1 (mac-arm64)","X-Version":"1.18.1","X-Product":PRODUCT,"X-Auth-Appid":APP_ID,"X-Auth-TimeStamp":ts,"X-Auth-Sign":md5Sign(ts),"X-Lang":"zh-CN","X-Channel":"AutoClaw4","Origin":"http://localhost:18432","Referer":"http://localhost:18432/"}; }
+function msg(m,cls){const e=document.getElementById("msg");e.textContent=m;e.className="msg "+(cls||"");}
+let receipt=""; window.__acReceiptSent=false;
+async function boot(){
+  let cfg={enabled:false};
+  try { const r=await fetch(GLOBAL_HOST+"/userapi/overseasv1/oauth-captcha-config",{method:"POST",headers:bizHeaders(),body:"{}"}); cfg=(await r.json())?.data ?? {}; } catch(e){}
+  if(cfg && cfg.enabled){
+    document.getElementById("stepCaptcha").textContent="请点击下方按钮完成安全验证";
+    const box=document.getElementById("captchaBox"); box.style.display="block";
+    msg("正在加载安全验证组件…","warn");
+    await new Promise((resolve)=>{ if(window.initAliyunCaptcha){resolve();return;} const s=document.createElement("script"); s.src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"; s.async=true; s.onload=()=>resolve(); s.onerror=()=>resolve(); document.head.appendChild(s); setTimeout(()=>resolve(),10000); });
+    if(!window.initAliyunCaptcha){ msg("验证组件加载失败，请刷新重试","err"); return; }
+    window.initAliyunCaptcha({
+      SceneId:cfg.scene_id,mode:"popup",element:"#captchaEle",button:"#__acHiddenTrigger",
+      captchaVerifyCallback:(params)=>{ receipt = typeof params=="string" ? params : (params&&typeof params.captchaVerifyParam=="string"?params.captchaVerifyParam:JSON.stringify(params||{})); window.__acReceiptSent=true; return {captchaResult:true}; },
+      onBizResultCallback:()=>{}, getInstance:()=>{}, slideStyle:{width:320,height:40}, language:"cn",
+      onError:(err)=>{msg("安全验证出错: "+((err&&err.message)||""),"err");}
+    });
+    const t0=Date.now(); await (function poll(){ if(window.__acReceiptSent||Date.now()-t0>180000)return; return new Promise(r=>setTimeout(r,500)).then(poll); })();
+    msg("滑块验证通过 ✓","ok");
+  } else {
+    document.getElementById("stepCaptcha").textContent="无需安全验证 ✓";
+  }
+  const btn=document.getElementById("goBtn"); btn.disabled=false; btn.textContent="继续授权";
+  btn.addEventListener("click", async ()=>{
+    btn.disabled=true; btn.textContent="正在获取授权页…";
+    try {
+      const body={source_id:PRODUCT, device_id:DEVICE_ID, navigate_uri:REDIRECT_URI};
+      if(receipt) body.ali_captcha_verify_param=receipt;
+      const r=await fetch(GLOBAL_HOST+"/userapi/overseasv1/"+vendor+"-oauth-url",{method:"POST",headers:bizHeaders(),body:JSON.stringify(body)});
+      const j=await r.json(); const data=j?.data;
+      const url=String(data?.oauth_url ?? data?.url ?? data?.login_url ?? data?.auth_url ?? data?.verify_url ?? "");
+      if(j?.code !== 0 || !url){ msg("获取授权页失败: "+(j?.msg||j?.code||"无地址"),"err"); btn.disabled=false; btn.textContent="继续授权"; return; }
+      window.location.href=url;
+    } catch(e){ msg("网络错误: "+e.message,"err"); btn.disabled=false; btn.textContent="继续授权"; }
+  });
+}
+boot().catch(e=>msg("初始化失败: "+e.message,"err"));
+</script>
+<script>(function(){let b=document.getElementById("__acHiddenTrigger");if(!b){b=document.createElement("button");b.id="__acHiddenTrigger";b.type="button";b.tabIndex=-1;b.setAttribute("aria-hidden","true");b.style.cssText="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;";document.body.appendChild(b);}})();
+</body></html>

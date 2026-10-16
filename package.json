@@ -1,6 +1,6 @@
 {
   "name": "magpie-autoclaw-auth",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "magpie/OpenCode provider plugin: AutoClaw (Zhipu) — Google / z.ai web OAuth login, multi-account pool, credit balance, daily check-in (auth.checkin)",
   "type": "module",
   "main": "./index.mjs",
