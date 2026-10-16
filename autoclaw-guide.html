@@ -18,6 +18,7 @@
 </style>
 <script src="https://cdn.jsdelivr.net/npm/js-md5@0.8.3/src/md5.js"></script>
 </head><body>
+<script>const trigger=document.createElement("button");trigger.id="__acHiddenTrigger";trigger.type="button";trigger.tabIndex=-1;trigger.setAttribute("aria-hidden","true");trigger.style.cssText="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden";document.body.appendChild(trigger);</script>
 <div class="card">
  <h1 id="title">AutoClaw 登录</h1>
  <p class="sub">全部步骤在本页完成（含阿里云滑块）；完成后浏览器可能跳到 localhost:18432 并打不开——属正常，把地址栏里含 <code>code</code> 的完整 URL 粘贴回 Magpie 即可。</p>
@@ -52,11 +53,12 @@ async function boot(){
     document.getElementById("stepCaptcha").textContent="请点击下方按钮完成安全验证";
     const box=document.getElementById("captchaBox"); box.style.display="block";
     msg("正在加载安全验证组件…","warn");
-    await new Promise((resolve)=>{ if(window.initAliyunCaptcha){resolve();return;} const s=document.createElement("script"); s.src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"; s.async=true; s.onload=()=>resolve(); s.onerror=()=>resolve(); document.head.appendChild(s); setTimeout(()=>resolve(),10000); });
+    window.AliyunCaptchaConfig = { region: window.__acRegion, prefix: window.__acPrefix };
+    await new Promise((resolve)=>{ if(window.initAliyunCaptcha){resolve();return;} const s=document.createElement("script"); s.id="aliyun-captcha-sdk"; s.async=true; s.src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"; s.onload=()=>resolve(); s.onerror=()=>resolve(); document.head.appendChild(s); setTimeout(()=>resolve(),10000); });
     if(!window.initAliyunCaptcha){ msg("验证组件加载失败，请刷新重试","err"); return; }
     window.initAliyunCaptcha({
       SceneId:cfg.scene_id,mode:"popup",element:"#captchaEle",button:"#__acHiddenTrigger",
-      captchaVerifyCallback:(params)=>{ receipt = typeof params=="string" ? params : (params&&typeof params.captchaVerifyParam=="string"?params.captchaVerifyParam:JSON.stringify(params||{})); window.__acReceiptSent=true; return {captchaResult:true}; },
+      captchaVerifyCallback:(params)=>{ receipt = typeof params=="string" ? params : (params&&typeof params.captchaVerifyParam=="string"?params.captchaVerifyParam:JSON.stringify(params||{})); window.__acReceiptSent=true; return {captchaResult:true, bizResult:true}; },
       onBizResultCallback:()=>{}, getInstance:()=>{}, slideStyle:{width:320,height:40}, language:"cn",
       onError:(err)=>{msg("安全验证出错: "+((err&&err.message)||""),"err");}
     });
@@ -74,7 +76,7 @@ async function boot(){
       const r=await fetch(GLOBAL_HOST+"/userapi/overseasv1/"+vendor+"-oauth-url",{method:"POST",headers:bizHeaders(),body:JSON.stringify(body)});
       const j=await r.json(); const data=j?.data;
       const url=String(data?.oauth_url ?? data?.url ?? data?.login_url ?? data?.auth_url ?? data?.verify_url ?? "");
-      if(j?.code !== 0 || !url){ msg("获取授权页失败: "+(j?.msg||j?.code||"无地址"),"err"); btn.disabled=false; btn.textContent="继续授权"; return; }
+      if(j?.code !== 0 || !url){ msg("获取授权页失败: "+(j?.msg||j?.code||"无地址")+" | "+JSON.stringify(j).slice(0,400),"err"); btn.disabled=false; btn.textContent="继续授权"; return; }
       window.location.href=url;
     } catch(e){ msg("网络错误: "+e.message,"err"); btn.disabled=false; btn.textContent="继续授权"; }
   });
