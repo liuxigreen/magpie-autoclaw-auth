@@ -153,6 +153,9 @@ test("插件工厂：config() 注册供应商/模型，auth/provider 钩子齐�
   assert.ok(plugin.auth.refresh && plugin.auth.loader && plugin.auth.usage);
   assert.equal(typeof plugin.auth.checkin, "function"); // 原生签到钩子存在
   assert.ok(plugin.auth.methods[0].prompts.length > 0); // OAuth 引导页选项存在
+  assert.equal(plugin.auth.methods.length, 2); // 网页登录 + 手动粘贴登录
+  assert.match(plugin.auth.methods[1].label, /手动粘贴/);
+  assert.equal(typeof plugin.auth.methods[1].authorize, "function");
   assert.equal(plugin.provider.id, "autoclaw");
 
   // 幂等：config 二次调用不覆盖既有配置
