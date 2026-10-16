@@ -53,7 +53,7 @@ async function boot(){
     document.getElementById("stepCaptcha").textContent="请点击下方按钮完成安全验证";
     const box=document.getElementById("captchaBox"); box.style.display="block";
     msg("正在加载安全验证组件…","warn");
-    window.AliyunCaptchaConfig = { region: window.__acRegion, prefix: window.__acPrefix };
+    window.AliyunCaptchaConfig = { region: cfg.region || "ga", prefix: cfg.prefix || "" };
     await new Promise((resolve)=>{ if(window.initAliyunCaptcha){resolve();return;} const s=document.createElement("script"); s.id="aliyun-captcha-sdk"; s.async=true; s.src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"; s.onload=()=>resolve(); s.onerror=()=>resolve(); document.head.appendChild(s); setTimeout(()=>resolve(),10000); });
     if(!window.initAliyunCaptcha){ msg("验证组件加载失败，请刷新重试","err"); return; }
     window.initAliyunCaptcha({
