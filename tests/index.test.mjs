@@ -9,6 +9,7 @@ import { _internal, AutoclawAuthPlugin } from "../index.mjs";
 const {
   md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken,
   newDeviceId, signinConfig, checkinOutcome, accountDisplayName,
+  isSmsAccountToken, hostsForAuth, phoneSmsMethod, CN_HOST, GLOBAL_HOST,
 } = _internal;
 
 const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString("base64url");
@@ -153,9 +154,12 @@ test("插件工厂：config() 注册供应商/模型，auth/provider 钩子齐�
   assert.ok(plugin.auth.refresh && plugin.auth.loader && plugin.auth.usage);
   assert.equal(typeof plugin.auth.checkin, "function"); // 原生签到钩子存在
   assert.ok(plugin.auth.methods[0].prompts.length > 0); // OAuth 引导页选项存在
-  assert.equal(plugin.auth.methods.length, 2); // 网页登录 + 手动粘贴登录
-  assert.match(plugin.auth.methods[1].label, /手动粘贴/);
+  assert.equal(plugin.auth.methods.length, 3); // 网页登录 + 手机验证码 + 手动粘贴登录
+  assert.match(plugin.auth.methods[1].label, /手机验证码/);
   assert.equal(typeof plugin.auth.methods[1].authorize, "function");
+  assert.equal(plugin.auth.methods[1].prompts[0].key, "phone");
+  assert.match(plugin.auth.methods[2].label, /手动粘贴/);
+  assert.equal(typeof plugin.auth.methods[2].authorize, "function");
   assert.equal(plugin.provider.id, "autoclaw");
 
   // 幂等：config 二次调用不覆盖既有配置
@@ -487,4 +491,143 @@ test("findIgnoreAsciiCase / replaceAllIgnoreAsciiCase：字节级大小写折叠
   assert.equal(replaceAllIgnoreAsciiCase("aAaA", "aa", "-"), "--");
   assert.equal(replaceAllIgnoreAsciiCase("nope", "aa", "-"), null);
   assert.equal(replaceAllIgnoreAsciiCase("中文ABC中文abc", "abc", "X"), "中文X中文X");
+});
+
+// ---- v0.9.0 新增：CN ↔ 全球互备的 host 归属判定 -------------------------------
+// 上游账号是分区的：国内短信账号只认 CN 侧，Google/z.ai 账号只认全球侧。
+// 判定依据是 refresh token 的 JWT claim source_id（agent* = 国内短信号）。
+
+const mkJwt = (claims) => [
+  b64url({ alg: "HS256", typ: "JWT" }),
+  b64url(claims),
+  "sig",
+].join(".");
+
+test("isSmsAccountToken：source_id 以 agent 开头即国内短信号", () => {
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "agent" })), true);
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "agent-cn" })), true);
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "AgentCN" })), true); // 大小写不敏感
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "google" })), false);
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "zai" })), false);
+  assert.equal(isSmsAccountToken(mkJwt({})), false);
+  assert.equal(isSmsAccountToken(""), false);
+  assert.equal(isSmsAccountToken(undefined), false);
+});
+
+test("isSmsAccountToken：真实 source_id 形如 agentrefresh_token / autoclawrefresh_token", () => {
+  // 2026-10-17 DMIT 实测：上游填的是「token 种类」而非纯账号来源
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "agentrefresh_token" })), true);
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "agentaccess_token" })), true);
+  // 🔴 autoclaw 以 a 开头，但绝不能误判成 agent
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "autoclawrefresh_token" })), false);
+  assert.equal(isSmsAccountToken(mkJwt({ source_id: "autoclawaccess_token" })), false);
+});
+
+test("hostsForAuth：国内短信账号 → CN 优先，国际账号 → 全球优先", () => {
+  // 国内短信号：refresh 里的 source_id=agent
+  assert.deepEqual(
+    hostsForAuth({ refresh: mkJwt({ source_id: "agent" }), access: mkJwt({}) }),
+    [CN_HOST, GLOBAL_HOST],
+  );
+  // Google 号
+  assert.deepEqual(
+    hostsForAuth({ refresh: mkJwt({ source_id: "google" }), access: mkJwt({}) }),
+    [GLOBAL_HOST, CN_HOST],
+  );
+  // z.ai 号
+  assert.deepEqual(
+    hostsForAuth({ refresh: mkJwt({ source_id: "zai" }), access: mkJwt({}) }),
+    [GLOBAL_HOST, CN_HOST],
+  );
+});
+
+test("hostsForAuth：没有 refresh 时退回 access，两者都无则默认全球优先", () => {
+  assert.deepEqual(
+    hostsForAuth({ access: mkJwt({ source_id: "agent" }) }),
+    [CN_HOST, GLOBAL_HOST],
+  );
+  assert.deepEqual(hostsForAuth({}), [GLOBAL_HOST, CN_HOST]);
+  assert.deepEqual(hostsForAuth(undefined), [GLOBAL_HOST, CN_HOST]);
+});
+
+test("hostsForAuth：两个 host 互不相同且都非空（真互备，不是同一个地址）", () => {
+  const h = hostsForAuth({ refresh: mkJwt({ source_id: "google" }) });
+  assert.equal(h.length, 2);
+  assert.notEqual(h[0], h[1]);
+  assert.ok(h[0].startsWith("https://"));
+  assert.ok(h[1].startsWith("https://"));
+});
+
+// ---- v0.9.0 新增：手机验证码登录 ---------------------------------------------
+
+test("phoneSmsMethod：是 oauth 类型、只有 phone 一个 prompt、authorize 为函数", () => {
+  assert.equal(phoneSmsMethod.type, "oauth");
+  assert.match(phoneSmsMethod.label, /手机验证码/);
+  assert.equal(typeof phoneSmsMethod.authorize, "function");
+  assert.equal(phoneSmsMethod.prompts.length, 1);
+  assert.equal(phoneSmsMethod.prompts[0].key, "phone");
+  assert.equal(phoneSmsMethod.prompts[0].type, "text");
+});
+
+test("phoneSmsMethod：手机号校验只收 11 位、不带 +86", () => {
+  const v = phoneSmsMethod.prompts[0].validate;
+  assert.equal(v("13800138000"), undefined);
+  assert.ok(v("1380013800"));      // 10 位
+  assert.ok(v("138001380001"));    // 12 位
+  assert.ok(v("+8613800138000"));  // 带 +86
+  assert.ok(v(""));                // 空
+  assert.ok(v(undefined));
+});
+
+test("phoneSmsMethod：手机号非法时 throw（宿主契约要求 oauth 失败必须 throw）", async () => {
+  await assert.rejects(
+    () => phoneSmsMethod.authorize({ phone: "123" }),
+    /11 位手机号/,
+  );
+  await assert.rejects(() => phoneSmsMethod.authorize({}), /11 位手机号/);
+});
+
+test("phoneSmsMethod：发码走后端 → 返回 code 模式，callback 校验验证码形态", async () => {
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return new Response(JSON.stringify({ code: 0, msg: "ok", data: {} }), { status: 200 });
+  };
+  try {
+    const r = await phoneSmsMethod.authorize({ phone: "13800138000" });
+    // 发码打到 CN host 的 agent-send-code
+    assert.match(seen[0].url, /autoglm-acceleration-api\.zhipuai\.cn\/userapi\/v1\/agent-send-code$/);
+    assert.equal(seen[0].body.phone, "13800138000");
+    assert.equal(seen[0].body.source_id, "autoclaw");
+    assert.ok(seen[0].body.device_id, "必须带 device_id");
+
+    // 返回形态符合宿主 oauth method 契约
+    assert.equal(r.method, "code");
+    assert.match(r.instructions, /138\*\*\*\*8000/);
+    assert.equal(typeof r.callback, "function");
+
+    // 验证码形态非法 → failed（不该发请求）
+    const before = seen.length;
+    const bad = await r.callback({ code: "abc" });
+    assert.equal(bad.type, "failed");
+    assert.match(bad.error, /4~8 位数字/);
+    assert.equal(seen.length, before, "验证码非法时不应发起登录请求");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("phoneSmsMethod：发码失败（code !== 0）必须 throw，不能静默继续", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ code: 400001, msg: "手机号未注册" }), { status: 200 });
+  try {
+    await assert.rejects(
+      () => phoneSmsMethod.authorize({ phone: "13800138000" }),
+      /手机号未注册/,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

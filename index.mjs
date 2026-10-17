@@ -57,10 +57,48 @@ const USER_AGENT = `AutoClaw/${CLIENT_VERSION} (${PLATFORM_TM}-arm64)`;
 const GLOBAL_HOST = "https://autoglm-api.autoglm.ai";
 // 🔴 国内版是「加速域」，不是主站：实测 autoglm-api.zhipuai.cn 一律 410000/401，
 // 正确基址是 autoglm-acceleration-api.zhipuai.cn（来源：agent2api 的 region.rs）。
+// ⚠️ 社区版用的是主站 autoglm-api.zhipuai.cn —— 那条会 401/410000，别照抄。
 const CN_HOST = "https://autoglm-acceleration-api.zhipuai.cn";
 
+/**
+ * CN ↔ 全球互备：按账号来源给 host 排序。
+ *
+ * 上游账号是「分区」的 —— 国内短信账号只在 CN 侧认，Google/z.ai 账号只在全球侧认。
+ * 拿错侧调会 401/403，所以要**先挑对家，再谈切换**。
+ *
+ * 判定依据是 refresh token 的 JWT claim `source_id`：
+ *   `agent*`（agent / agent-cn / …）→ 国内短信账号 → CN 优先
+ *   其余（google / zai / …）        → 国际账号     → 全球优先
+ *
+ * 🔴 实测（2026-10-17，DMIT 真实账号）：上游填的其实是**带后缀的 token 种类**
+ * `access_token` / `refresh_token`，形如：
+ *   国内号（185****5211）  → `source_id = "agentrefresh_token"` / `"agentaccess_token"`
+ *   国际号（刘喜 / Gaytan）→ `source_id = "autoclawrefresh_token"` / `"autoclawaccess_token"`
+ * 所以 `^agent` 前缀判定依然成立，且 `autoclaw` 以 `a` 开头但**不会**被误判成 `agent`
+ * （逐字比对已验证）。社区版同规则。
+ *
+ * 拿不到 refresh（例如只有 access）时退回全局优先 —— 国际版是绝大多数情况。
+ * 与社区版 `refreshTokens()` 的排序规则保持一致。
+ */
+function isSmsAccountToken(token) {
+  return /^agent/i.test(String(jwtClaim(bareToken(token), "source_id") ?? ""));
+}
+
+/** 返回 [首选 host, 备选 host]（去重、去空）。 */
+function hostsForAuth(auth) {
+  const sources = [auth?.refresh, auth?.access].filter(Boolean);
+  let sms = false;
+  for (const t of sources) {
+    const s = jwtClaim(bareToken(t), "source_id");
+    if (s) { sms = /^agent/i.test(String(s)); break; }
+  }
+  return sms ? dedupe([CN_HOST, GLOBAL_HOST]) : dedupe([GLOBAL_HOST, CN_HOST]);
+}
+
 // 🔴 路径不带 `/v1`：upstreamPath = '/chat/completions'（源实现 forwardModelRequest）。
-// 带 `/v1` 会被上游当成未知路径 → 403 pay-view / 406 空体（实测对照见诊断报告）。
+// ⚠️ 2026-10-17 A/B 实测修正：**带 `/v1` 也能通**（同 token 单变量：带/不带都是 200）。
+// 真正触发 406 的是 `X-Harness-Type: zcode` 这个头，与路径无关。此处仍保留无 `/v1`
+// 的写法，因为它是源实现的原样路径，不是因为我们验证过 `/v1` 会失败。
 const CHAT_PATH = "/autoclaw-proxy/proxy/autoclaw/chat/completions";
 const WALLETS_PATH = `/agent-assetmgr/api/v2/wallets?biz_app_id=${PRODUCT}`;
 
@@ -712,7 +750,10 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
 
     auth: {
       provider: providerId,
-      methods: [loginMethod, manualOauthMethod],
+      // 顺序即 GUI 里的按钮顺序：网页登录优先（体验最顺），
+      // 手机验证码次之（无需浏览器，服务器/远程环境最实用），
+      // 授权链接兜底（本地页打不开时手动粘贴）。
+      methods: [loginMethod, phoneSmsMethod, manualOauthMethod],
 
       async refresh(auth) {
         const t = await refreshTokens(bareToken(auth.refresh), [homeHost]);
@@ -735,10 +776,12 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         const auth = await getAuth();
         if (auth?.type !== "oauth" || !auth.access) return {};
         const accessToken = bareToken(auth.access);
-        const hosts = [GLOBAL_HOST, CN_HOST]; // CN_HOST 仅作 401/403 换侧与 refresh 备选
+        // 🔴 CN ↔ 全球互备：按账号来源排序（国内短信账号 → CN 优先；
+        // Google/z.ai 账号 → 全球优先）。拿错侧调会 401，两个方向互为备份。
+        const hosts = hostsForAuth(auth);
 
         return {
-          baseURL: homeHost,
+          baseURL: hosts[0],
           async fetch(input, init) {
             const headers = new Headers(init?.headers);
             headers.set("X-Authorization", `Bearer ${accessToken}`);
@@ -1053,6 +1096,84 @@ const manualOauthMethod = {
         { label: "Google 账号", value: "google" },
         { label: "z.ai 账号", value: "zai" },
       ] },
+  ],
+};
+
+// ---------------------------------------------------------------------------
+// 登录方式：国内手机验证码（无需浏览器 / 无需滑块，可在任意机器上登录）
+// ---------------------------------------------------------------------------
+
+/**
+ * 国内手机号登录：这是**唯一不需要浏览器**的登录路径 ——
+ * 发码、校验全程是普通 POST，服务器上直接 `magpie plugin login` 就能用。
+ *
+ * 协议（2026-10-17 对照社区版 `@magpie-community/opencode-autoclaw-auth` v0.2.0）：
+ *   POST {CN_HOST}/userapi/v1/agent-send-code   {source_id, device_id, phone}
+ *   POST {CN_HOST}/userapi/v1/agent-login/      {source_id, device_id, phone, code}
+ * 信封 `code === 0` 且 `data.access_token` 存在即成功。
+ *
+ * 🔴 手机号只认国内 host（CN_HOST = 加速域）。拿它去全球 host 调会 401。
+ *
+ * 宿主契约细节：`type: "oauth"` 的 `authorize()` **失败必须 throw** —— 返回
+ * `{type:"failed"}` 会被宿主的 auto 分支当成"无参 callback()"再调一次，行为不可预期。
+ * 成功才返回 `{type:"success", ...}`。
+ */
+const phoneSmsMethod = {
+  type: "oauth",
+  label: "AutoClaw 手机验证码登录（国内号）",
+  async authorize(inputs) {
+    const phone = String(inputs?.phone ?? "").trim();
+    if (!/^1\d{10}$/.test(phone)) throw new Error("请输入 11 位手机号（不带 +86）");
+
+    const deviceId = newDeviceId();
+    const send = await callEnvelope("/userapi/v1/agent-send-code", {
+      method: "POST",
+      body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone }),
+      base: CN_HOST,
+    });
+    if (send.code !== 0) {
+      throw new Error(`发送验证码失败：${send.msg ?? `code ${send.code}`}`);
+    }
+
+    return {
+      url: "",
+      instructions: `验证码已发送到 ${phone.slice(0, 3)}****${phone.slice(-4)}，请输入短信里的验证码。`,
+      method: "code",
+      async callback(code) {
+        const value = String(code?.code ?? code ?? "").trim();
+        if (!/^\d{4,8}$/.test(value)) {
+          return { type: "failed", error: "验证码应是 4~8 位数字" };
+        }
+        const res = await callEnvelope("/userapi/v1/agent-login/", {
+          method: "POST",
+          body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone, code: value }),
+          base: CN_HOST,
+        });
+        if (res.code !== 0 || !res.data?.access_token) {
+          return { type: "failed", error: `登录失败：${res.msg ?? `code ${res.code}`}` };
+        }
+        const t = tokenFields(res.data);
+        // 登录响应里 user_name 常为空 → 会显示成「已登录」，拉 profile 补昵称/手机号
+        const profile = await fetchUserProfile(t.access, CN_HOST);
+        const displayName = accountDisplayName(profile, phone);
+        return {
+          type: "success",
+          ...t,
+          accountId: displayName,
+          email: displayName,
+          uid: nonEmptyString(res.data.user_id) ?? undefined,
+        };
+      },
+    };
+  },
+  prompts: [
+    {
+      type: "text",
+      key: "phone",
+      message: "手机号（11 位，不带 +86）",
+      placeholder: "13800138000",
+      validate: (v) => (/^1\d{10}$/.test(String(v ?? "").trim()) ? undefined : "请输入 11 位手机号"),
+    },
   ],
 };
 
@@ -1409,6 +1530,7 @@ export const _internal = {
     IDENTITY_LINE, IDENTITY_PREFIX, FOREIGN_IDENTITIES,
   guidePageHtml, callbackPageHtml, remoteGuideHtml,
   manualOauthMethod, overseaOAuthMethod,
+  phoneSmsMethod, hostsForAuth, isSmsAccountToken, GLOBAL_HOST,
   CHAT_PATH, CN_HOST, PLATFORM_TM, USER_AGENT,
 };
 
