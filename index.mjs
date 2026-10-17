@@ -1519,6 +1519,25 @@ export const AutoclawAuthPlugin = makeAutoclawPlugin({
   loginMethod: overseaOAuthMethod,
 });
 
+/**
+ * provider `autoclaw-cn`：国内版（手机验证码账号）。
+ *
+ * 为什么必须单独注册一个 provider 而不是复用 `autoclaw`：
+ * magpie 的账号是由**登录时所处的 provider** 决定的（`logins.json` 里的
+ * `agent: "plugin:autoclaw-cn"`）。国内号当初就是用 `autoclaw-cn` 登录的，
+ * 如果不注册这个 provider，那个账号在 `magpie providers` / `accounts` 里
+ * **根本不会出现**，等于废着用不了。
+ *
+ * 两个 provider 共用同一套逻辑与凭据存储（`plugin-auth.json` 按 provider id 分区），
+ * 只是首选 host 与默认登录方式不同。
+ */
+export const AutoclawCnAuthPlugin = makeAutoclawPlugin({
+  providerId: "autoclaw-cn",
+  providerName: "AutoClaw 国内 (Zhipu)",
+  homeHost: CN_HOST,
+  loginMethod: phoneSmsMethod,
+});
+
 /** 测试辅助（magpie/OpenCode 不会把它当插件调用）。 */
 export const _internal = {
   md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken, newDeviceId,
