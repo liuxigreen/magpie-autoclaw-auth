@@ -158,7 +158,7 @@ test("插件工厂：config() 注册供应商/模型，auth/provider 钩子齐�
   assert.match(plugin.auth.methods[1].label, /手机验证码/);
   assert.equal(typeof plugin.auth.methods[1].authorize, "function");
   assert.equal(plugin.auth.methods[1].prompts[0].key, "phone");
-  assert.match(plugin.auth.methods[2].label, /手动粘贴/);
+  assert.match(plugin.auth.methods[2].label, /授权链接/); // v0.9.2：本地监听优先，粘贴只是降级
   assert.equal(typeof plugin.auth.methods[2].authorize, "function");
   assert.equal(plugin.provider.id, "autoclaw");
 
@@ -174,7 +174,7 @@ test("插件工厂：config() 注册供应商/模型，auth/provider 钩子齐�
 
 test("manualOauthMethod.authorize：URL 携带 device_id / redirect_uri / vendor", async () => {
   const { manualOauthMethod } = _internal;
-  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const out = await manualOauthMethod.authorize({ vendor: "google", paste: true });
   assert.equal(out.method, "code");
   const u = new URL(out.url);
   assert.equal(u.host, "liuxigreen.github.io");
@@ -187,7 +187,7 @@ test("manualOauthMethod.authorize：URL 携带 device_id / redirect_uri / vendor
 
 test("manualOauthMethod.authorize：zai 分支同样透传（redirect 后缀随 vendor）", async () => {
   const { manualOauthMethod } = _internal;
-  const out = await manualOauthMethod.authorize({ vendor: "zai" });
+  const out = await manualOauthMethod.authorize({ vendor: "zai", paste: true });
   const u = new URL(out.url);
   assert.equal(u.searchParams.get("vendor"), "zai");
   assert.ok(u.searchParams.get("device_id"));
@@ -196,8 +196,8 @@ test("manualOauthMethod.authorize：zai 分支同样透传（redirect 后缀随 
 
 test("manualOauthMethod.authorize：每次调用 device_id 均不同（会话隔离）", async () => {
   const { manualOauthMethod } = _internal;
-  const a = new URL((await manualOauthMethod.authorize({ vendor: "google" })).url).searchParams.get("device_id");
-  const b = new URL((await manualOauthMethod.authorize({ vendor: "google" })).url).searchParams.get("device_id");
+  const a = new URL((await manualOauthMethod.authorize({ vendor: "google", paste: true })).url).searchParams.get("device_id");
+  const b = new URL((await manualOauthMethod.authorize({ vendor: "google", paste: true })).url).searchParams.get("device_id");
   assert.notEqual(a, b);
 });
 
@@ -212,7 +212,7 @@ test("remoteGuideHtml：device_id 内联进页面（自渲染引导页）", () =
 
 test("manualOauthMethod.callback：非法/空粘贴内容给出明确失败，不抛异常", async () => {
   const { manualOauthMethod } = _internal;
-  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const out = await manualOauthMethod.authorize({ vendor: "google", paste: true });
   const r1 = await out.callback("");
   assert.equal(r1.type, "failed");
   assert.match(r1.error, /为空/);
@@ -222,7 +222,7 @@ test("manualOauthMethod.callback：非法/空粘贴内容给出明确失败，�
 
 test("callback：粘了错误回调（含 error=）给出明确提示，不发请求", async () => {
   const { manualOauthMethod } = _internal;
-  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const out = await manualOauthMethod.authorize({ vendor: "google", paste: true });
   const r = await out.callback("http://localhost:18432/auth/callback-google?error=access_denied&state=x");
   assert.equal(r.type, "failed");
   assert.match(r.error, /授权被拒绝|错误回调/);
@@ -230,7 +230,7 @@ test("callback：粘了错误回调（含 error=）给出明确提示，不发�
 
 test("callback：粘了无 code 的 URL 给出明确提示", async () => {
   const { manualOauthMethod } = _internal;
-  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const out = await manualOauthMethod.authorize({ vendor: "google", paste: true });
   const r = await out.callback("https://liuxigreen.github.io/magpie-autoclaw-auth/autoclaw-guide.html?vendor=google");
   assert.equal(r.type, "failed");
   assert.match(r.error, /没有 code/);
@@ -238,7 +238,7 @@ test("callback：粘了无 code 的 URL 给出明确提示", async () => {
 
 test("callback：裸 code 形态可疑时提前拦住", async () => {
   const { manualOauthMethod } = _internal;
-  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  const out = await manualOauthMethod.authorize({ vendor: "google", paste: true });
   const r = await out.callback("ab");
   assert.equal(r.type, "failed");
   assert.match(r.error, /形态可疑/);
@@ -665,8 +665,49 @@ test("autoclaw：首选 host 是全球，首个登录方式是网页 OAuth", asy
   assert.match(p.auth.methods[0].label, /网页登录/);
 });
 
-test("两个 provider 各自注册、互不覆盖，且模型表一致", async () => {
-  const cfg = {};
+// ---- v0.9.2：授权链接登录改为「本地监听优先，粘贴兜底」 ----------------------
+
+test("manualOauthMethod：默认走本地监听（method=auto），不再强制粘贴", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google" });
+  try {
+    assert.equal(out.method, "auto");
+    assert.match(out.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+    assert.equal(typeof out.callback, "function");
+    // 回调地址就是官方白名单形态（host=localhost、固定路径、白名单端口）
+    const port = new URL(out.url).port;
+    assert.match(out.instructions, new RegExp(`127\\.0\\.0\\.1:${port}`));
+  } finally {
+    // 别调 callback（会等浏览器 5 分钟）：走 abort 让会话立即结束并释放端口
+    const port = new URL(out.url).port;
+    await fetch(`http://127.0.0.1:${port}/abort`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "test" }),
+    }).catch(() => {});
+    await out.callback().catch(() => {});
+  }
+});
+
+test("manualOauthMethod：paste:true 强制降级为粘贴（method=code）", async () => {
+  const { manualOauthMethod } = _internal;
+  const out = await manualOauthMethod.authorize({ vendor: "google", paste: true });
+  assert.equal(out.method, "code");
+  assert.match(out.url, /^https:\/\/liuxigreen\.github\.io\//);
+});
+
+test("本地回调：state 不匹配时拒收，且不污染会话", () => {
+  const { acceptLocalCallback } = _internal;
+  // 未发起授权时 expectedOauthState === null → 任何 code 都不收
+  assert.equal(acceptLocalCallback(null, "abc", "x"), false);
+  // 发起后 state 不符 → 拒收
+  assert.equal(acceptLocalCallback("S1", "abc", "S2"), false);
+  // 完全匹配 → 收
+  assert.equal(acceptLocalCallback("S1", "abc", "S1"), true);
+  // 缺 code → 拒收
+  assert.equal(acceptLocalCallback("S1", null, "S1"), false);
+});
+
+test("两个 provider 各自注册、互不覆盖，且模型表一致", async () => {  const cfg = {};
   await (await AutoclawAuthPlugin({}, {})).config(cfg);
   await (await AutoclawCnAuthPlugin({}, {})).config(cfg);
   assert.ok(cfg.provider.autoclaw);
