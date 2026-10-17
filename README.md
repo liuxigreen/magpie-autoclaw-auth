@@ -2,11 +2,19 @@
 
 [magpie](https://usemagpie.ai) / [OpenCode](https://opencode.ai) provider 插件：**AutoClaw（智谱澳龙 / OpenClaw 云端账号体系）**。
 
-一个包注册供应商 `autoclaw`，支持三种登录方式，并内置 **CN ↔ 全球双通道互备**：
+一个包注册**两个供应商**（`autoclaw` / `autoclaw-cn`），共支持三种登录方式，并内置 **CN ↔ 全球双通道互备**：
 
-| 供应商 id | 登录方式 | 上游 host | 模型引用 |
+| 供应商 id | 面向账号 | 上游 host | 模型引用 |
 |---|---|---|---|
-| `autoclaw` | ① 网页 OAuth（Google / z.ai）<br>② **手机验证码（国内号）**<br>③ 授权链接粘贴 | `autoglm-api.autoglm.ai`（国际）<br>`autoglm-acceleration-api.zhipuai.cn`（国内） | `autoclaw/zai_auto` 等 |
+| `autoclaw` | 国际号（Google / z.ai / 邮箱） | `autoglm-api.autoglm.ai` | `autoclaw/zai_auto` 等 |
+| `autoclaw-cn` | 国内手机号 | `autoglm-acceleration-api.zhipuai.cn`（加速域） | `autoclaw-cn/zai_auto` 等 |
+
+两个供应商各自都保留了「首选 + 备选」的双 host 回退能力，所以**任一侧都可用**，只是默认首选不同。
+
+> 🔴 **为什么要拆成两个供应商？**
+> magpie 的账号归属由**登录时所处的 provider** 决定（`logins.json` 里的 `agent` 字段）。用手机验证码登录会写入
+> `agent: "plugin:autoclaw-cn"`，如果插件不注册这个 provider，该账号在 `magpie providers` / `accounts` 里会**完全不可见**——
+> 等于白登录。（v0.9.1 之前就是这样，国内号一直是废着的。）
 
 支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan）：
 
@@ -29,15 +37,17 @@ magpie plugin add ./magpie-autoclaw-auth
 #     服务器 / 远程环境最省事（也是唯一不依赖 127.0.0.1 和滑块的方式）
 #  ③「AutoClaw 授权链接登录」——打开上游授权页，登录后把跳转地址栏的完整 URL 粘贴回来，
 #     不伺服任何本地页面，适合 127.0.0.1 打不开的环境（远程服务器 / 代理劫持 / 浏览器与 magpie 不同机）
-magpie plugin login autoclaw
+magpie plugin login autoclaw      # 国际号（Google / z.ai / 授权链接）
+magpie plugin login autoclaw-cn   # 国内手机号（验证码）
 
-magpie provider test autoclaw zai_auto   # 连通测试
-magpie quota                              # 积分余额与签到状态
+magpie provider test autoclaw     # 连通测试
+magpie provider test autoclaw-cn
+magpie quota                      # 积分余额与签到状态
 ```
 
 OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magpie 的 `plugin-auth.json`（600 权限）/ OpenCode 的 `auth.json`。
 
-## CN ↔ 全球双通道互备（v0.9.0 新增）
+## CN ↔ 全球双通道互备（v0.9.0 新增，v0.9.1 补齐双 provider）
 
 上游账号是**分区**的：国内手机号账号只认国内 host，Google / z.ai 账号只认国际 host。拿错侧调会 `401`。
 
@@ -52,6 +62,17 @@ OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magp
 - 两个方向互为备份：首选返回 **401** 时自动切到另一侧重试；两侧都 401 才判定登录失效并在面板标红
 - ⚠️ **只有 401 才换 host**。403 有三种业务形态（`forbidden` 平台绑定 / `pay-view` 810001 额度 / `810002` 限流），换侧既无用又会把真实原因伪装成「登录失效」，故原样透传
 - 🔴 国内 host 必须是**加速域** `autoglm-acceleration-api.zhipuai.cn`。主站 `autoglm-api.zhipuai.cn` 实测一律 `410000 / 401`
+- 判定函数 `isSmsAccountToken()` 用 `/^agent/i` 前缀匹配；`autoclaw` 以 `a` 开头但第二个字符是 `u`，**不会**误判
+
+**真机验证（插件 0.9.1）**
+
+```
+✓ magpie provider test autoclaw     917 ms · zai_auto
+✓ magpie provider test autoclaw-cn 1296 ms · zai_auto
+
+autoclaw     · <account-a>       subscription  积分余额 0% (795 积分)   当日已签 ✓ +400
+autoclaw-cn  · <account-b> subscription  积分余额 0% (200 积分)  当日未签（+200）
+```
 
 
 ## 每日签到（核心功能）
