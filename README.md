@@ -2,18 +2,19 @@
 
 [magpie](https://usemagpie.ai) / [OpenCode](https://opencode.ai) provider 插件：**AutoClaw（智谱澳龙 / OpenClaw 云端账号体系）**。
 
-一个包注册供应商 `autoclaw`（国际版），用 Google / z.ai 邮箱网页 OAuth 登录：
+一个包注册供应商 `autoclaw`，支持三种登录方式，并内置 **CN ↔ 全球双通道互备**：
 
 | 供应商 id | 登录方式 | 上游 host | 模型引用 |
 |---|---|---|---|
-| `autoclaw` | Google / z.ai 邮箱网页 OAuth | `autoglm-api.autoglm.ai` | `autoclaw/zai_auto` 等 |
+| `autoclaw` | ① 网页 OAuth（Google / z.ai）<br>② **手机验证码（国内号）**<br>③ 授权链接粘贴 | `autoglm-api.autoglm.ai`（国际）<br>`autoglm-acceleration-api.zhipuai.cn`（国内） | `autoclaw/zai_auto` 等 |
 
-支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan / `tdpsk_` 豆包 DeepSeek）：
+支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan）：
 
 - `zai_auto` / `zai_auto-fast`（自动路由，推荐默认）
-- `zai_glm-5.3-flash` / `zai_glm-5-turbo`
 - `zaicoding_glm-5.3`
-- `tdpsk_deepseek-v4-flash-202605` / `tdpsk_deepseek-v4-pro-202606`
+- `zai_glm-5.3-flash`
+
+> 旧表里的 `zai_glm-5-turbo`、`tdpsk_deepseek-v4-*` 上游已下架（实测 `400 非法模型`），已移除。
 
 ## 安装
 
@@ -22,17 +23,36 @@ magpie plugin add github:<你的用户名>/magpie-autoclaw-auth   # 推荐：发
 # 或本地调试：
 magpie plugin add ./magpie-autoclaw-auth
 
-# 登录方式二选一（GUI 里是两个按钮，CLI 会询问）：
+# 登录方式三选一（GUI 里是三个按钮，CLI 会询问）：
 #  ①「AutoClaw 网页登录」——本机引导页（滑块 + 授权自动回跳），适合本机桌面环境
-#  ②「AutoClaw 授权链接登录」——打开上游授权页，登录后把跳转地址栏的完整 URL 粘贴回来，
+#  ②「AutoClaw 手机验证码登录」——输入国内手机号收短信，**全程无需浏览器**，
+#     服务器 / 远程环境最省事（也是唯一不依赖 127.0.0.1 和滑块的方式）
+#  ③「AutoClaw 授权链接登录」——打开上游授权页，登录后把跳转地址栏的完整 URL 粘贴回来，
 #     不伺服任何本地页面，适合 127.0.0.1 打不开的环境（远程服务器 / 代理劫持 / 浏览器与 magpie 不同机）
-magpie plugin login autoclaw          # Google / z.ai 邮箱登录
+magpie plugin login autoclaw
 
 magpie provider test autoclaw zai_auto   # 连通测试
 magpie quota                              # 积分余额与签到状态
 ```
 
 OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magpie 的 `plugin-auth.json`（600 权限）/ OpenCode 的 `auth.json`。
+
+## CN ↔ 全球双通道互备（v0.9.0 新增）
+
+上游账号是**分区**的：国内手机号账号只认国内 host，Google / z.ai 账号只认国际 host。拿错侧调会 `401`。
+
+插件从 token 的 JWT claim `source_id` 自动判断归属，**先挑对家，再谈切换**：
+
+| `source_id` | 账号类型 | 首选 host | 备选 host |
+|---|---|---|---|
+| `agent*`（实测形如 `agentrefresh_token`） | 国内手机号 | 国内（加速域） | 国际 |
+| 其余（`autoclaw*` / `google` / `zai`） | 国际 | 国际 | 国内 |
+
+- 实测（实测）：`<account-b>` 账号 `source_id = agentrefresh_token` → CN 优先；其余国际账号 → 全球优先 ✅
+- 两个方向互为备份：首选返回 **401** 时自动切到另一侧重试；两侧都 401 才判定登录失效并在面板标红
+- ⚠️ **只有 401 才换 host**。403 有三种业务形态（`forbidden` 平台绑定 / `pay-view` 810001 额度 / `810002` 限流），换侧既无用又会把真实原因伪装成「登录失效」，故原样透传
+- 🔴 国内 host 必须是**加速域** `autoglm-acceleration-api.zhipuai.cn`。主站 `autoglm-api.zhipuai.cn` 实测一律 `410000 / 401`
+
 
 ## 每日签到（核心功能）
 
@@ -75,7 +95,7 @@ echo '{ "signin": true, "signinHour": null, "signinOnUsage": false }' > ~/.confi
 
 ## 已知行为
 
-- 对话 fetch 已内置 401 自动换侧重试（国内 host 仅作备用通道）。**403 不再当作登录失效**——上游 403 有 `forbidden`（平台绑定）、`pay-view/810001`（额度/高峰）、`810002`（限流）三种业务形态，原样透传给客户端。
+- 对话 fetch 已内置 401 自动换侧重试（**按账号归属排序**：国内号 CN 优先、国际号全球优先，两侧真互备）。**403 不当作登录失效**——上游 403 有 `forbidden`（平台绑定）、`pay-view/810001`（额度/高峰）、`810002`（限流）三种业务形态，原样透传给客户端。
 - 上游模型白名单随版本变化，模型下线时上游返回 `400 非法模型`（原样透传错误消息）。模型清单已按上游真实目录收敛为 4 个。
 - refresh token 与 AutoClaw 桌面端**共用会互踢**（双方都轮换），插件账号请勿同时在桌面端登录。
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。
