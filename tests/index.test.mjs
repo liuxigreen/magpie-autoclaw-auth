@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _internal, AutoclawAuthPlugin } from "../index.mjs";
+import { _internal, AutoclawAuthPlugin, AutoclawCnAuthPlugin } from "../index.mjs";
 
 const {
   md5Hex, jwtClaim, tokenFields, bizHeaders, bareToken,
@@ -630,4 +630,50 @@ test("phoneSmsMethod：发码失败（code !== 0）必须 throw，不能静默�
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ---- v0.9.0 新增：双 provider 注册（autoclaw / autoclaw-cn） -------------------
+// magpie 的账号归属由「登录时的 provider」决定（logins.json 的 agent 字段）。
+// 国内号当初是用 autoclaw-cn 登录的 —— 不注册这个 provider，那个账号
+// 在 providers/accounts 里根本不会出现，等于废着。
+// 宿主源码（strings 提自 binary）：
+//   "servers are the plugin functions a module exports: default {id?, server} (v1),
+//    else every function it exports, ..."  ⇒ 命名导出全部会被加载。
+
+test("导出形态：两个 provider 工厂都是函数（命名导出即可被宿主加载）", () => {
+  assert.equal(typeof AutoclawAuthPlugin, "function");
+  assert.equal(typeof AutoclawCnAuthPlugin, "function");
+});
+
+test("autoclaw-cn：providerName/首选 host/默认登录方式都指向国内", async () => {
+  const p = await AutoclawCnAuthPlugin({}, {});
+  const cfg = {};
+  await p.config(cfg);
+  assert.equal(p.auth.provider, "autoclaw-cn");
+  assert.match(cfg.provider["autoclaw-cn"].name, /国内/);
+  assert.equal(cfg.provider["autoclaw-cn"].api, CN_HOST);
+  // 国内 provider 的首个登录按钮必须是手机验证码（无需浏览器）
+  assert.match(p.auth.methods[0].label, /手机验证码/);
+});
+
+test("autoclaw：首选 host 是全球，首个登录方式是网页 OAuth", async () => {
+  const p = await AutoclawAuthPlugin({}, {});
+  const cfg = {};
+  await p.config(cfg);
+  assert.equal(p.auth.provider, "autoclaw");
+  assert.equal(cfg.provider.autoclaw.api, GLOBAL_HOST);
+  assert.match(p.auth.methods[0].label, /网页登录/);
+});
+
+test("两个 provider 各自注册、互不覆盖，且模型表一致", async () => {
+  const cfg = {};
+  await (await AutoclawAuthPlugin({}, {})).config(cfg);
+  await (await AutoclawCnAuthPlugin({}, {})).config(cfg);
+  assert.ok(cfg.provider.autoclaw);
+  assert.ok(cfg.provider["autoclaw-cn"]);
+  assert.notEqual(cfg.provider.autoclaw.api, cfg.provider["autoclaw-cn"].api);
+  assert.deepEqual(
+    Object.keys(cfg.provider.autoclaw.models).sort(),
+    Object.keys(cfg.provider["autoclaw-cn"].models).sort(),
+  );
 });
