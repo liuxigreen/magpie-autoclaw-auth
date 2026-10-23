@@ -1148,7 +1148,7 @@ const manualOauthMethod = {
  *
  * 协议（2026-10-17 对照社区版 `@magpie-community/opencode-autoclaw-auth` v0.2.0）：
  *   POST {CN_HOST}/userapi/v1/agent-send-code   {source_id, device_id, phone}
- *   POST {CN_HOST}/userapi/v1/agent-login/      {source_id, device_id, phone, code}
+ *   POST {CN_HOST}/userapi/v1/agent-login     {source_id, device_id, phone, code}
  * 信封 `code === 0` 且 `data.access_token` 存在即成功。
  *
  * 🔴 手机号只认国内 host（CN_HOST = 加速域）。拿它去全球 host 调会 401。
@@ -1183,7 +1183,10 @@ const phoneSmsMethod = {
         if (!/^\d{4,8}$/.test(value)) {
           return { type: "failed", error: "验证码应是 4~8 位数字" };
         }
-        const res = await callEnvelope("/userapi/v1/agent-login/", {
+        // 🔴 末尾不能带斜杠：上游 2026-10 起对 "/agent-login/" 回 307
+        //    Location: /userapi/v1/agent-login（不带斜杠才是 200）。
+        //    宿主不跟随重定向时会拿到空 body，登录直接失败。
+        const res = await callEnvelope("/userapi/v1/agent-login", {
           method: "POST",
           body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone, code: value }),
           base: CN_HOST,
