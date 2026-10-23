@@ -753,7 +753,10 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
       // 顺序即 GUI 里的按钮顺序：网页登录优先（体验最顺），
       // 手机验证码次之（无需浏览器，服务器/远程环境最实用），
       // 授权链接兜底（本地页打不开时手动粘贴）。
-      methods: [loginMethod, phoneSmsMethod, manualOauthMethod],
+      //
+      // 🔴 去重：autoclaw-cn 把 loginMethod 设成了 phoneSmsMethod，
+      //    直接展开会让「手机验证码」出现两次（镜像里点哪个都一样）。
+      methods: [...new Set([loginMethod, phoneSmsMethod, manualOauthMethod])],
 
       async refresh(auth) {
         const t = await refreshTokens(bareToken(auth.refresh), [homeHost]);
