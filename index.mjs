@@ -1030,8 +1030,23 @@ const manualOauthMethod = {
     // 🔴 先试本地监听：浏览器与 magpie 同机时，授权后自动回跳、自动完成登录，
     //    不需要复制粘贴。端口全被占（远程服务器 / 官方桌面端在跑）才降级为粘贴。
     // `inputs.paste === true` 时跳过监听（测试与「明确想走粘贴」的场景）。
+    //
+    // 🔴 无头环境（远程服务器 / 容器 / WSL 无 GUI）必须直接走粘贴：
+    //    Linux 上没有 DISPLAY / WAYLAND_DISPLAY ⇒ 用户不在本机，
+    //    local.url 是服务器自己的 127.0.0.1，客户端浏览器必然打不开。
+    //    v0.9.2 只按「端口能不能 listen」判断，导致远程场景返回一个打不开的地
+    //    址（方式③主路径失效）—— 这里按宿主机环境判断，不再依赖端口偶然失败。
+    //    AUTOCLAW_FORCE_PASTE=1 可强制；=0 可强制回到本地监听（同机调试用）。
+    const headless = process.platform === "linux"
+      && !process.env.DISPLAY
+      && !process.env.WAYLAND_DISPLAY;
+    const forcePaste = inputs?.paste === true
+      || process.env.AUTOCLAW_FORCE_PASTE === "1"
+      || (headless && process.env.AUTOCLAW_FORCE_PASTE !== "0");
+
     let local = null;
-    if (!inputs?.paste) {
+    // 无头环境不再空占 OAuth 白名单端口：跳过监听，端口留给真正需要它的场景
+    if (!forcePaste) {
       try {
         local = await startLocalOAuth(vendor);
       } catch { /* 端口全占：走手动粘贴兜底 */ }

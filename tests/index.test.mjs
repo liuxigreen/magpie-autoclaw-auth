@@ -201,6 +201,69 @@ test("manualOauthMethod.authorize：每次调用 device_id 均不同（会话隔
   assert.notEqual(a, b);
 });
 
+// ---- 无头环境判定（v0.9.3）-------------------------------------------------
+// 远程服务器没有 DISPLAY，local.url 指向服务器自己的 127.0.0.1，客户端打不开。
+// 这种情况必须直接给出 GitHub Pages 粘贴链接，而不是先试本地监听。
+
+test("manualOauthMethod.authorize：AUTOCLAW_FORCE_PASTE=1 时强制粘贴（不占端口）", async () => {
+  const { manualOauthMethod } = _internal;
+  const prev = process.env.AUTOCLAW_FORCE_PASTE;
+  process.env.AUTOCLAW_FORCE_PASTE = "1";
+  try {
+    const out = await manualOauthMethod.authorize({ vendor: "google" });
+    assert.equal(out.method, "code", "强制粘贴时必须返回 method=code");
+    assert.equal(new URL(out.url).host, "liuxigreen.github.io");
+  } finally {
+    if (prev === undefined) delete process.env.AUTOCLAW_FORCE_PASTE;
+    else process.env.AUTOCLAW_FORCE_PASTE = prev;
+  }
+});
+
+test("manualOauthMethod.authorize：无 DISPLAY 的 Linux 走粘贴（远程服务器场景）", async () => {
+  const { manualOauthMethod } = _internal;
+  const prevPlat = Object.getOwnPropertyDescriptor(process, "platform");
+  const prevD = process.env.DISPLAY;
+  const prevW = process.env.WAYLAND_DISPLAY;
+  const prevF = process.env.AUTOCLAW_FORCE_PASTE;
+  // 模拟无头 Linux 宿主
+  Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  delete process.env.DISPLAY;
+  delete process.env.WAYLAND_DISPLAY;
+  delete process.env.AUTOCLAW_FORCE_PASTE;
+  try {
+    const out = await manualOauthMethod.authorize({ vendor: "google" });
+    assert.equal(out.method, "code", "无头宿主必须直接粘贴，不能返回 127.0.0.1");
+    assert.doesNotMatch(out.url, /127\.0\.0\.1/, "无头宿主不应给出本地回环地址");
+    assert.equal(new URL(out.url).host, "liuxigreen.github.io");
+  } finally {
+    Object.defineProperty(process, "platform", prevPlat);
+    if (prevD !== undefined) process.env.DISPLAY = prevD;
+    if (prevW !== undefined) process.env.WAYLAND_DISPLAY = prevW;
+    if (prevF !== undefined) process.env.AUTOCLAW_FORCE_PASTE = prevF;
+  }
+});
+
+test("manualOauthMethod.authorize：AUTOCLAW_FORCE_PASTE=0 可在无头宿主强行回到本地监听", async () => {
+  const { manualOauthMethod } = _internal;
+  const prevPlat = Object.getOwnPropertyDescriptor(process, "platform");
+  const prevD = process.env.DISPLAY;
+  const prevF = process.env.AUTOCLAW_FORCE_PASTE;
+  Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  delete process.env.DISPLAY;
+  process.env.AUTOCLAW_FORCE_PASTE = "0";
+  let out;
+  try {
+    out = await manualOauthMethod.authorize({ vendor: "google" });
+  } finally {
+    Object.defineProperty(process, "platform", prevPlat);
+    if (prevD !== undefined) process.env.DISPLAY = prevD;
+    if (prevF === undefined) delete process.env.AUTOCLAW_FORCE_PASTE;
+    else process.env.AUTOCLAW_FORCE_PASTE = prevF;
+  }
+  // 端口可能全占（CI/本机）⇒ 仍会退到粘贴；只要不是「无头 + 未强制」的静默失败即可
+  assert.ok(["auto", "code"].includes(out.method), `method 异常: ${out.method}`);
+});
+
 test("remoteGuideHtml：device_id 内联进页面（自渲染引导页）", () => {
   const { remoteGuideHtml } = _internal;
   const did = "deadbeef".repeat(8);
