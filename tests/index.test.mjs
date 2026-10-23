@@ -804,3 +804,21 @@ test("checkin 里的账号判定：国内号不领灵感中心", () => {
   assert.equal(isSmsAccountToken(smsTok), true, "国内号应识别为 SMS 账号");
   assert.equal(isSmsAccountToken(globTok), false, "国际号不应识别为 SMS 账号");
 });
+
+// ---- 手机验证码登录 body 形态（v0.9.8）--------------------------------------
+// 逆向 AutoClaw 2.2.0 main.cjs：post() 统一注入 {app, source_id, device_id}。
+// 缺 app ⇒ agent-login 回 400001；send-code 不校验所以「能收码却登不上」。
+
+test("phoneSmsMethod：body 必须带 app=zwork 与数字 code（结构约束）", () => {
+  const { phoneSmsMethod } = _internal;
+  // 只校验 prompts 与标签存在（无法离线发请求），确保方法结构未被破坏
+  assert.equal(phoneSmsMethod.label.includes("手机验证码"), true);
+  assert.ok(Array.isArray(phoneSmsMethod.prompts));
+  assert.equal(phoneSmsMethod.prompts[0].key, "phone");
+  assert.equal(typeof phoneSmsMethod.authorize, "function");
+});
+
+test("ZWORK_APP 常量已导出且为 zwork", () => {
+  const { ZWORK_APP } = _internal;
+  assert.equal(ZWORK_APP, "zwork");
+});

@@ -34,6 +34,12 @@ import { spawn } from "node:child_process";
 const APP_ID = "100003";
 const APP_KEY = "38d2391985e2369a5fb8227d8e6cd5e5";
 const PRODUCT = "autoclaw";
+/**
+ * 🔴 身份网关的 app 标识（AutoClaw 2.2.0 `post()` 统一注入 `{app, source_id, device_id}`）。
+ * 缺它时 agent-login 回 400001「请求数据有问题」；send-code 不校验所以能收到短信。
+ * 来源：`D:\autoclaw\AutoClaw2\resources\app\dist\main.cjs` → `aRi="zwork"`。
+ */
+const ZWORK_APP = "zwork";
 const CHANNEL = "AutoClaw4";
 const CLIENT_VERSION = "1.18.1";
 /**
@@ -1204,9 +1210,16 @@ const manualOauthMethod = {
  * 国内手机号登录：这是**唯一不需要浏览器**的登录路径 ——
  * 发码、校验全程是普通 POST，服务器上直接 `magpie plugin login` 就能用。
  *
- * 协议（2026-10-17 对照社区版 `@magpie-community/opencode-autoclaw-auth` v0.2.0）：
- *   POST {CN_HOST}/userapi/v1/agent-send-code   {source_id, device_id, phone}
- *   POST {CN_HOST}/userapi/v1/agent-login     {source_id, device_id, phone, code}
+ * 协议（2026-10-23 逆向 AutoClaw 2.2.0 `resources/app/dist/main.cjs` 取得）：
+ *   POST {CN_HOST}/userapi/v1/agent-send-code   {app, source_id, device_id, phone}
+ *   POST {CN_HOST}/userapi/v1/agent-login       {app, source_id, device_id, phone, code}
+ *
+ * 🔴 **`app: "zwork"` 是 agent-login 的必填字段**（官方客户端 post() 统一注入
+ *    `{app, source_id, device_id}`）。缺它时上游回 `400001 请求数据有问题`
+ *    —— 而 send-code 不校验 app，所以「能收到验证码、输对了也登不上」。
+ *    社区版同样缺这个字段（`agent-login/` 还带尾斜杠 → 307），已失效。
+ * 🔴 `code` 在官方客户端里是 **Number(code)**，不是字符串。
+ *
  * 信封 `code === 0` 且 `data.access_token` 存在即成功。
  *
  * 🔴 手机号只认国内 host（CN_HOST = 加速域）。拿它去全球 host 调会 401。
@@ -1225,7 +1238,9 @@ const phoneSmsMethod = {
     const deviceId = newDeviceId();
     const send = await callEnvelope("/userapi/v1/agent-send-code", {
       method: "POST",
-      body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone }),
+      body: JSON.stringify({
+        app: ZWORK_APP, source_id: PRODUCT, device_id: deviceId, phone,
+      }),
       base: CN_HOST,
     });
     if (send.code !== 0) {
@@ -1241,12 +1256,19 @@ const phoneSmsMethod = {
         if (!/^\d{4,8}$/.test(value)) {
           return { type: "failed", error: "验证码应是 4~8 位数字" };
         }
-        // 🔴 末尾不能带斜杠：上游 2026-10 起对 "/agent-login/" 回 307
-        //    Location: /userapi/v1/agent-login（不带斜杠才是 200）。
-        //    宿主不跟随重定向时会拿到空 body，登录直接失败。
+        // 🔴 两处都不能少：
+        //    ① 末尾不带斜杠（"/agent-login/" 现在回 307）
+        //    ② body 必须带 `app: "zwork"`，code 用数字
+        //       缺 app ⇒ 400001「请求数据有问题」（send-code 不校验，故能收码却登不上）
         const res = await callEnvelope("/userapi/v1/agent-login", {
           method: "POST",
-          body: JSON.stringify({ source_id: PRODUCT, device_id: deviceId, phone, code: value }),
+          body: JSON.stringify({
+            app: ZWORK_APP,
+            source_id: PRODUCT,
+            device_id: deviceId,
+            phone,
+            code: Number(value),
+          }),
           base: CN_HOST,
         });
         if (res.code !== 0 || !res.data?.access_token) {
@@ -1711,7 +1733,7 @@ export const _internal = {
     IDENTITY_LINE, IDENTITY_PREFIX, FOREIGN_IDENTITIES,
   guidePageHtml, callbackPageHtml, remoteGuideHtml,
   manualOauthMethod, overseaOAuthMethod,
-  phoneSmsMethod, hostsForAuth, isSmsAccountToken, GLOBAL_HOST,
+  phoneSmsMethod, hostsForAuth, isSmsAccountToken, GLOBAL_HOST, ZWORK_APP,
   claimInspirationCenter,
   CHAT_PATH, CN_HOST, PLATFORM_TM, USER_AGENT,
   acceptLocalCallback, startLocalOAuth, OAUTH_SESSION_TIMEOUT_MS,
