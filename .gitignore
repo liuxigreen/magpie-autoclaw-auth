@@ -7,3 +7,8 @@ coverage/
 .claude/
 _probe/
 scrub.py
+
+# 本地备份目录（绝不入库）
+.git.bak-*/
+.git-*/
+*.bak-*
