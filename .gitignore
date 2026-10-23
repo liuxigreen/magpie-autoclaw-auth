@@ -6,3 +6,4 @@ coverage/
 .env*
 .claude/
 _probe/
+scrub.py
