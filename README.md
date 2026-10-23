@@ -66,7 +66,7 @@ OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magp
 | `agent*`（实测形如 `agentrefresh_token`） | 国内手机号 | 国内（加速域） | 国际 |
 | 其余（`autoclaw*` / `google` / `zai`） | 国际 | 国际 | 国内 |
 
-- 实测（实测）：`<account-b>` 账号 `source_id = agentrefresh_token` → CN 优先；其余国际账号 → 全球优先 ✅
+- 实测：国内手机号账号（`source_id = agentrefresh_token`）→ CN 优先；其余国际账号 → 全球优先 ✅
 - 两个方向互为备份：首选返回 **401** 时自动切到另一侧重试；两侧都 401 才判定登录失效并在面板标红
 - ⚠️ **只有 401 才换 host**。403 有三种业务形态（`forbidden` 平台绑定 / `pay-view` 810001 额度 / `810002` 限流），换侧既无用又会把真实原因伪装成「登录失效」，故原样透传
 - 🔴 国内 host 必须是**加速域** `autoglm-acceleration-api.zhipuai.cn`。主站 `autoglm-api.zhipuai.cn` 实测一律 `410000 / 401`
@@ -78,8 +78,8 @@ OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magp
 ✓ magpie provider test autoclaw     917 ms · zai_auto
 ✓ magpie provider test autoclaw-cn 1296 ms · zai_auto
 
-autoclaw     · <account-a>       subscription  积分余额 0% (795 积分)   当日已签 ✓ +400
-autoclaw-cn  · <account-b> subscription  积分余额 0% (200 积分)  当日未签（+200）
+autoclaw     · <account-a>   subscription  积分余额 0% (xxx 积分)   当日已签 ✓ +400
+autoclaw-cn  · <account-b>   subscription  积分余额 0% (xxx 积分)   当日未签（+200）
 ```
 
 

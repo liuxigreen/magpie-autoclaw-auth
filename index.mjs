@@ -73,7 +73,7 @@ const CN_HOST = "https://autoglm-acceleration-api.zhipuai.cn";
  * 🔴 实测（实测 真实账号）：上游填的其实是**带后缀的 token 种类**
  * `access_token` / `refresh_token`，形如：
  *   国内号（<account-b>）  → `source_id = "agentrefresh_token"` / `"agentaccess_token"`
- *   国际号（国际账号）→ `source_id = "autoclawrefresh_token"` / `"autoclawaccess_token"`
+ *   国际号 → `source_id = "autoclawrefresh_token"` / `"autoclawaccess_token"`
  * 所以 `^agent` 前缀判定依然成立，且 `autoclaw` 以 `a` 开头但**不会**被误判成 `agent`
  * （逐字比对已验证）。社区版同规则。
  *
