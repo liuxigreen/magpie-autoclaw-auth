@@ -835,6 +835,21 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
             //   autoclaw -> 200 ✓
             // 详见 agent2api `providers/autoclaw/adapter.rs` 模块头「上游 2026-09-22
             // 起的两道闸」第 1 条，以及本仓库诊断报告第三节。
+            //
+            // 🔴 这里必须真的 delete：`new Headers(init?.headers)` 会把 magpie
+            // 转发时带的头全部继承下来（magpie 自身会带 `X-Harness-Type`），
+            // 只写注释不删等于没做。同时清掉其他 harness 指纹头。
+            for (const h of [
+              "X-Harness-Type",
+              "x-harness-type",
+              "X-Harness",
+              "X-Claude-Code-Version",
+              "X-Codex-Version",
+              "X-OpenCode-Version",
+              "X-Agent-Name",
+            ]) {
+              headers.delete(h);
+            }
             headers.set("X-Tm", PLATFORM_TM);
             headers.set("X-Version", CLIENT_VERSION);
             headers.set("X-Lang", "zh-CN");
