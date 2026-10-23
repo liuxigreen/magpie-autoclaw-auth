@@ -625,6 +625,33 @@ function checkinOutcome(r) {
   return { outcome: "failed", message: String(r.message ?? r.msg ?? "签到失败") };
 }
 
+/**
+ * 领取「进入灵感中心」每日任务（daily_inspiration_center，200 积分/天）。
+ *
+ * 🔴 只在**国际账号**上领：国内手机号账号实测返回
+ *    {success:false, reward_points:0}，但 status 仍被翻成 completed —— 等于
+ *    当天机会被吃掉却没拿到积分。所以按 host 区分，CN 账号一律跳过。
+ * 🔴 全程静默：任何失败都返回 null，绝不 throw —— 这项是「顺带多拿」，
+ *    不能因为它让整个 checkin 被宿主判成 failed 而 30 分钟后重试。
+ *
+ * @returns {Promise<number|null>} 领取到的积分，未领取返回 null
+ */
+async function claimInspirationCenter(accessToken, host) {
+  try {
+    const res = await fetch(`${host}/autoclaw-proxy/proxy/autoclaw-task-complete`, {
+      method: "POST",
+      headers: bizHeaders(accessToken),
+      body: JSON.stringify({ task_id: "daily_inspiration_center", source_id: PRODUCT }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const env = await res.json().catch(() => null);
+    const r = env?.data;
+    return r?.success ? (optNumber(r.reward_points) ?? 0) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 本地去重键（成功才记；按小时允许重试）。 */
 const signinTriedLocal = new Map(); // key → hour-stamp of last SUCCESSFUL signin
 
@@ -939,11 +966,13 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         // 先查任务状态：区分「无签到活动」（inactive）与「查询失败」（throw → failed 重试）
         let task = null;
         let lastErr = null;
+        let taskHost = null;   // 成功拿到任务列表的 host，灵感中心复用它
         for (const h of hosts) {
           try {
             const tasks = await taskList(token, h);
             if (tasks) {
               task = tasks.find((x) => x?.task_id === "daily_signin") ?? null;
+              taskHost = h;
               break;
             }
           } catch (e) { lastErr = e; }
@@ -957,7 +986,21 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         // 补签：主 host 优先，无响应再试备用 host（服务端幂等）
         const r = await dailySignin(token, hosts[0]).catch(() => null)
           ?? await dailySignin(token, hosts[1] ?? hosts[0]).catch(() => null);
-        return checkinOutcome(r);
+
+        // 🔴 顺带领「进入灵感中心」（+200/天）。拿到任务列表的 host 就是要用的那个；
+        //    国内账号跳过（见 claimInspirationCenter 注释）。失败静默，不影响签到结果。
+        let bonus = null;
+        try {
+          const bonusHost = isSmsAccountToken(token) ? null : (taskHost ?? hosts[0]);
+          if (bonusHost) bonus = await claimInspirationCenter(token, bonusHost);
+        } catch { /* 静默 */ }
+
+        const out = checkinOutcome(r);
+        if (bonus) {
+          out.credit = (out.credit ?? 0) + bonus;
+          out.message = `${out.message ?? ""}${out.message ? " · " : ""}灵感中心 +${bonus}`;
+        }
+        return out;
       },
     },
 
@@ -1654,6 +1697,7 @@ export const _internal = {
   guidePageHtml, callbackPageHtml, remoteGuideHtml,
   manualOauthMethod, overseaOAuthMethod,
   phoneSmsMethod, hostsForAuth, isSmsAccountToken, GLOBAL_HOST,
+  claimInspirationCenter,
   CHAT_PATH, CN_HOST, PLATFORM_TM, USER_AGENT,
   acceptLocalCallback, startLocalOAuth, OAUTH_SESSION_TIMEOUT_MS,
 };

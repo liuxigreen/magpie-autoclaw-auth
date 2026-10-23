@@ -781,3 +781,26 @@ test("两个 provider 各自注册、互不覆盖，且模型表一致", async (
     Object.keys(cfg.provider["autoclaw-cn"].models).sort(),
   );
 });
+
+// ---- 灵感中心（daily_inspiration_center）------------------------------------
+// 国际账号实测可领 +200；国内手机号账号会「翻成 completed 但 reward=0」，
+// 等于白吃当天机会 ⇒ 必须按账号类型跳过。
+
+test("claimInspirationCenter：网络/接口异常一律返回 null，绝不 throw", async () => {
+  const { claimInspirationCenter } = _internal;
+  // 用一个必然连不上的 host，确保进入 catch
+  const r = await claimInspirationCenter("fake-token", "http://127.0.0.1:1");
+  assert.equal(r, null);
+});
+
+test("checkin 里的账号判定：国内号不领灵感中心", () => {
+  const { isSmsAccountToken } = _internal;
+  const b64url = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const jwt = (p) => `${b64url({ alg: "none" })}.${b64url(p)}.sig`;
+
+  const smsTok = jwt({ source_id: "agentrefresh_token" });
+  const globTok = jwt({ source_id: "autoclawrefresh_token" });
+
+  assert.equal(isSmsAccountToken(smsTok), true, "国内号应识别为 SMS 账号");
+  assert.equal(isSmsAccountToken(globTok), false, "国际号不应识别为 SMS 账号");
+});
