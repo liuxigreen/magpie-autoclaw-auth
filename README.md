@@ -37,7 +37,10 @@ GET {host}/autoclaw-proxy/proxy/autoclaw-model-config
                        metadata: { gates } } ] }
 ```
 
-- 上游新增的模型**不用等插件发版**就会出现在面板里（GLM-5.4 就是这样拿到的）
+- 上游新增的模型**不用等插件发版**就会出现在面板里
+- 实测（2026-11-24）：目录返回 6 条，其中 **GLM-5.4 的 routeId 是 `zai_glm-x-preview`**
+  （上游用代号发布，显示名才是 `GLM-5.4`）——这正说明写死的表不可能跟上：
+  按名字找 `glm-5.4` 永远找不到，只有拉目录才知道它叫 `x-preview`
 - 按官方客户端的规则过滤：`anthropic-messages` 协议的跳过、`metadata.gates`
   里 `hidden`/`disabled` 且条件成立的跳过
 - 目录请求伪装成官方客户端：国内 `X-Version: 2.1.0` / `X-Channel: AutoClaw26`，
