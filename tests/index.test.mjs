@@ -822,3 +822,137 @@ test("ZWORK_APP 常量已导出且为 zwork", () => {
   const { ZWORK_APP } = _internal;
   assert.equal(ZWORK_APP, "zwork");
 });
+
+// ---- 上游模型目录（动态，v0.9.9）--------------------------------------------
+// 修复「拿不到 GLM-5.4」：模型清单改为登录后从上游
+// GET /autoclaw-proxy/proxy/autoclaw-model-config 实时读取。
+
+const {
+  catalogUrl, catalogHeaders, catalogEntry, catalogRow, catalogModels,
+  gateHolds, gatedOut, versionCmp, liveRouteIds,
+} = _internal;
+
+test("catalogUrl：国内走加速域，国际走海外域名", () => {
+  assert.equal(catalogUrl("autoclaw-cn"),
+    "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw-model-config");
+  assert.equal(catalogUrl("autoclaw"),
+    "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw-model-config");
+});
+
+test("catalogHeaders：国内带 2.1.0 / AutoClaw26 指纹与双层鉴权头", () => {
+  const h = catalogHeaders("tok", "autoclaw-cn");
+  assert.equal(h["X-Version"], "2.1.0");
+  assert.equal(h["X-Channel"], "AutoClaw26");
+  assert.equal(h["X-Authorization"], "Bearer tok");
+  assert.equal(h["Authorization"], "Bearer tok");
+  assert.ok(String(h["User-Agent"]).startsWith("AutoClaw/2.1.0"));
+  // 官方客户端的 GET 不带这三个（业务头里有）
+  assert.equal("Origin" in h, false);
+  assert.equal("Referer" in h, false);
+  assert.equal("Content-Type" in h, false);
+});
+
+test("catalogHeaders：国际版 2.0.3 / official，且不发 User-Agent", () => {
+  const h = catalogHeaders("tok", "autoclaw");
+  assert.equal(h["X-Version"], "2.0.3");
+  assert.equal(h["X-Channel"], "official");
+  assert.equal("User-Agent" in h, false);
+});
+
+test("catalogEntry：字符串即裸 id", () => {
+  assert.deepEqual(catalogEntry("zai_glm-5.4"), { id: "zai_glm-5.4", bare: true });
+  assert.equal(catalogEntry("  "), null);
+  assert.equal(catalogEntry(123), null);
+});
+
+test("catalogEntry：非法 api / 缺 id 一律拒收", () => {
+  assert.equal(catalogEntry({ api: "openai-completions" }), null);
+  assert.equal(catalogEntry({ id: "x", api: "grpc" }), null);
+  assert.equal(catalogEntry([]), null);
+});
+
+test("catalogEntry：contextWindow 过小视为未声明，maxTokens 不得大于窗口", () => {
+  const a = catalogEntry({ id: "m", contextWindow: 999, maxTokens: 100 });
+  assert.equal(a.contextWindow, undefined);
+  const b = catalogEntry({ id: "m", contextWindow: 100000, maxTokens: 200000 });
+  assert.equal(b.maxTokens, undefined);
+  const c = catalogEntry({ id: "m", contextWindow: 100000, maxTokens: 32000 });
+  assert.equal(c.maxTokens, 32000);
+});
+
+test("catalogEntry：reasoningLevels 只保留白名单值", () => {
+  const e = catalogEntry({ id: "m", reasoningLevels: ["low", "MAX", "high", "bogus"] });
+  assert.deepEqual(e.levels, ["low", "high"]);
+});
+
+test("gateHolds：clientVersion gte/lt 与 channel in/notIn", () => {
+  assert.equal(gateHolds({ dimension: "clientVersion", gte: "2.1.0" }, { version: "1.18.1" }), false);
+  assert.equal(gateHolds({ dimension: "clientVersion", gte: "2.1.0" }, { version: "2.1.0" }), true);
+  assert.equal(gateHolds({ dimension: "clientVersion", lt: "2.0.0" }, { version: "2.1.0" }), false);
+  assert.equal(gateHolds({ dimension: "channel", in: ["official"] }, { channel: "domestic" }), false);
+  assert.equal(gateHolds({ dimension: "channel", notIn: ["official"] }, { channel: "domestic" }), true);
+});
+
+test("gatedOut：只有 hidden/disabled 才剔除，条件不成立则保留", () => {
+  const gates = [{ effect: "hidden", when: { all: [{ dimension: "clientVersion", gte: "2.1.0" }] } }];
+  assert.equal(gatedOut(gates, { version: "2.1.0" }), true);
+  assert.equal(gatedOut(gates, { version: "1.0.0" }), false);
+  assert.equal(gatedOut([{ effect: "warn" }], { version: "1.0.0" }), false);
+  assert.equal(gatedOut(undefined, {}), false);
+});
+
+test("catalogRow：字段与静态表同形，未知模型用目录给的值", () => {
+  const row = catalogRow(
+    { id: "zai_glm-5.4", name: "GLM-5.4", reasoning: true, image: true, contextWindow: 1048576, maxTokens: 131072 },
+    "autoclaw-cn", undefined, { id: "zai_auto", limit: { context: 1000, output: 100 } },
+  );
+  assert.equal(row.id, "zai_glm-5.4");
+  assert.equal(row.name, "GLM-5.4");
+  assert.deepEqual(row.limit, { context: 1048576, output: 131072 });
+  assert.equal(row.reasoning, true);
+  assert.equal(row.attachment, true);
+  assert.equal(row.tool_call, true);
+});
+
+test("catalogModels：解析上游返回并登记 liveRouteIds（GLM-5.4 可见）", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    models: [
+      "zai_auto",
+      { id: "zai_glm-5.4", name: "GLM-5.4", reasoning: true, contextWindow: 1048576, maxTokens: 131072, input: ["text", "image"] },
+      { id: "zzz_anthropic", api: "anthropic-messages" },
+      { id: "zzz_hidden", metadata: { gates: [{ effect: "hidden", when: { all: [{ dimension: "channel", in: ["domestic"] }] } }] } },
+    ],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  try {
+    const rows = await catalogModels("autoclaw-cn", "tok", { zai_auto: { id: "zai_auto", limit: { context: 1, output: 1 } } });
+    assert.ok(rows, "应解析成功");
+    assert.ok(rows["zai_glm-5.4"], "GLM-5.4 必须出现在结果里");
+    assert.equal(rows["zzz_anthropic"], undefined, "Anthropic 协议模型跳过");
+    assert.equal(rows["zzz_hidden"], undefined, "被 gates 隐藏的模型跳过");
+    assert.equal(liveRouteIds.has("zai_glm-5.4"), true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("catalogModels：401 / 结构不合规一律返回 null（回落静态表）", async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response("{}", { status: 401 });
+    assert.equal(await catalogModels("autoclaw", "tok"), null);
+    globalThis.fetch = async () => new Response(JSON.stringify({ models: [] }), { status: 200 });
+    assert.equal(await catalogModels("autoclaw", "tok"), null);
+    globalThis.fetch = async () => new Response(JSON.stringify({ models: [{ nope: 1 }] }), { status: 200 });
+    assert.equal(await catalogModels("autoclaw", "tok"), null);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("resolveRouteId：目录登记过的 id 原样透传，不被改写成 zai_auto", () => {
+  liveRouteIds.add("glm-5.4");
+  assert.equal(_internal.resolveRouteId("glm-5.4"), "glm-5.4");
+  // 未登记的裸名仍按旧规则回落
+  assert.equal(_internal.resolveRouteId("glm-9.9-unknown"), "zai_auto");
+});

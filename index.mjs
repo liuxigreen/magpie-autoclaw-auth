@@ -137,6 +137,226 @@ function autoclawModels() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 上游模型目录（动态）—— 解决「上游新模型拿不到」的根因
+// ---------------------------------------------------------------------------
+/**
+ * 官方客户端启动时向托管网关拉一份模型清单（不是写死在客户端里）：
+ *
+ *   GET {host}/autoclaw-proxy/proxy/autoclaw-model-config
+ *   → { models: [ "id" | { id, name, api, reasoning, input, contextWindow,
+ *                          maxTokens, reasoningLevels, metadata: { gates } } ] }
+ *
+ * 🔴 为什么必须动态拉：上游新增模型（GLM-5.4 这类）只出现在这份目录里，
+ * 客户端/插件写死的表**永远落后一版**。旧实现固定 4 条 5.3 模型，
+ * 所以面板里根本看不到 5.4 —— 不是登录问题，也不是额度问题。
+ *
+ * 读不到（未登录 / 网络失败 / 401 / 结构不合规）时回落到
+ * {@link autoclawModels} 的静态表，行为与旧版完全一致。
+ */
+const CATALOG_PATH = "/autoclaw-proxy/proxy/autoclaw-model-config";
+const CATALOG_MAX = 128;
+const CATALOG_BYTES = 512 * 1024;
+/** 目录请求要伪装成官方客户端：国内 2.1.0 / AutoClaw26，国际 2.0.3 / official。 */
+const CATALOG_VERSION_CN = "2.1.0";
+const CATALOG_CHANNEL_CN = "AutoClaw26";
+const CATALOG_VERSION_INTL = "2.0.3";
+const CATALOG_CHANNEL_INTL = "official";
+const REASONING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * 已从上游目录读到的 routeId 白名单。
+ * `resolveRouteId` 命中它时**原样透传**，避免把 `glm-5.4` 这种无前缀的新模型
+ * 误判成未知名字而回落到 `zai_auto`（那会静默换模型，比报错更难查）。
+ */
+const liveRouteIds = new Set();
+
+function catalogUrl(providerId) {
+  return (providerId === "autoclaw-cn" ? CN_HOST : GLOBAL_HOST) + CATALOG_PATH;
+}
+
+/** 官方客户端 managed gateway GET 的头（业务签名头 + 客户端版本指纹）。 */
+function catalogHeaders(accessToken, providerId) {
+  const cn = providerId === "autoclaw-cn";
+  const token = bareToken(accessToken);
+  const h = bizHeaders(token);
+  delete h["Content-Type"];
+  delete h["Origin"];
+  delete h["Referer"];
+  h["Accept"] = "*/*";
+  h["X-Version"] = cn ? CATALOG_VERSION_CN : CATALOG_VERSION_INTL;
+  h["X-Channel"] = cn ? CATALOG_CHANNEL_CN : CATALOG_CHANNEL_INTL;
+  h["X-Lang"] = cn ? "zh-CN" : "en";
+  h["X-Authorization"] = `Bearer ${token}`;
+  h["Authorization"] = `Bearer ${token}`;
+  if (cn) h["User-Agent"] = `AutoClaw/${CATALOG_VERSION_CN} (${PLATFORM_TM}-${process.arch})`;
+  else delete h["User-Agent"];
+  return h;
+}
+
+function catalogText(v, max) {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return !t || t.length > max || /[\u0000-\u001F\u007F]/.test(t) ? null : t;
+}
+
+function catalogInt(v, max) {
+  return Number.isSafeInteger(v) && v > 0 && v <= max ? v : undefined;
+}
+
+function versionCmp(a, b) {
+  const pa = String(a).split("-")[0].split(".").map(Number);
+  const pb = String(b).split("-")[0].split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/** 单条闸门条件是否成立（与官方客户端同口径）。 */
+function gateHolds(cond, ctx) {
+  if (!cond || typeof cond !== "object") return true;
+  switch (cond.dimension) {
+    case "clientVersion":
+      if (cond.gte === undefined && cond.lt === undefined) return true;
+      if (cond.gte !== undefined && versionCmp(ctx.version, cond.gte) < 0) return false;
+      if (cond.lt !== undefined && versionCmp(ctx.version, cond.lt) >= 0) return false;
+      return true;
+    case "channel":
+      if (Array.isArray(cond.in)) return cond.in.includes(ctx.channel);
+      if (Array.isArray(cond.notIn)) return !cond.notIn.includes(ctx.channel);
+      return true;
+    // 会员/编码套餐身份这里判断不了：交给网关在调用时拒绝，不从列表里藏
+    case "entitlement":
+      return false;
+    // 没有实验分桶、没有 UI 面：in 型不成立，notIn 型成立
+    case "experiment":
+    case "surface":
+      return !Array.isArray(cond.in) && !Array.isArray(cond.bucket);
+    default:
+      return true;
+  }
+}
+
+/** 该条目是否被 gates 隐藏/禁用。 */
+function gatedOut(gates, ctx) {
+  if (!Array.isArray(gates)) return false;
+  return gates.some((g) => {
+    if (!g || typeof g !== "object" || (g.effect !== "hidden" && g.effect !== "disabled")) return false;
+    if (g.when !== undefined) {
+      const all = g.when?.all;
+      return Array.isArray(all) && all.length > 0 && all.every((c) => gateHolds(c, ctx));
+    }
+    return gateHolds(g, ctx);
+  });
+}
+
+/** 解析一条目录条目；官方客户端会拒的形状一律返回 null。 */
+function catalogEntry(raw) {
+  if (typeof raw === "string") {
+    const id = catalogText(raw, 256);
+    return id ? { id, bare: true } : null;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const id = catalogText(raw.id, 256);
+  if (!id) return null;
+  if (raw.api !== undefined && raw.api !== "openai-completions" && raw.api !== "anthropic-messages") return null;
+  const context = catalogInt(raw.contextWindow, 1e7);
+  const contextWindow = context !== undefined && context >= 1000 ? context : undefined;
+  const max = catalogInt(raw.maxTokens, 1e6);
+  const maxTokens = max !== undefined && (contextWindow === undefined || max < contextWindow) ? max : undefined;
+  const input = Array.isArray(raw.input) ? raw.input.filter((x) => x === "text" || x === "image") : [];
+  const levelsRaw = raw.reasoningLevel ?? raw.reasoningLevels;
+  const levels = Array.isArray(levelsRaw)
+    ? [...new Set(levelsRaw.filter((x) => typeof x === "string").map((x) => x.trim()).filter((x) => REASONING_LEVELS.has(x)))]
+    : [];
+  const metadata = raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata) ? raw.metadata : {};
+  return {
+    id,
+    name: catalogText(raw.name, 2048) ?? id,
+    api: raw.api,
+    reasoning: raw.reasoning === true,
+    image: input.includes("image"),
+    contextWindow,
+    maxTokens,
+    levels,
+    gates: metadata.gates,
+  };
+}
+
+/** 目录条目 → magpie 运行时行（字段与 {@link autoclawModels} 保持同形）。 */
+function catalogRow(entry, providerId, given, template) {
+  const base = given ?? template ?? {};
+  const known = autoclawModels()[entry.id];
+  const bare = entry.bare === true;
+  const reasoning = bare ? (known?.reasoning ?? false) : entry.reasoning;
+  const image = bare ? (known?.attachment ?? false) : entry.image;
+  const context = entry.contextWindow ?? known?.limit?.context ?? base?.limit?.context ?? 0;
+  const output = entry.maxTokens ?? known?.limit?.output ?? (given ? base?.limit?.output : undefined) ?? 0;
+  return {
+    ...base,
+    id: entry.id,
+    providerID: base?.providerID ?? providerId,
+    name: entry.bare ? (known?.name ?? entry.id) : entry.name,
+    limit: { context, output },
+    reasoning,
+    tool_call: true,
+    attachment: image,
+    modalities: { input: image ? ["text", "image"] : ["text"], output: ["text"] },
+  };
+}
+
+/**
+ * 拉取并解析上游模型目录。
+ * @returns {Promise<object|null>} routeId → row；任何异常都返回 null（调用方用静态表）
+ */
+async function catalogModels(providerId, accessToken, given = {}, signal) {
+  const token = bareToken(accessToken);
+  if (!token) return null;
+  let res;
+  try {
+    res = await fetch(catalogUrl(providerId), {
+      method: "GET",
+      headers: catalogHeaders(token, providerId),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
+      redirect: "error",
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  let body;
+  try {
+    const text = await res.text();
+    if (text.length > CATALOG_BYTES) return null;
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const list = body && typeof body === "object" && !Array.isArray(body) ? body.models : undefined;
+  if (!Array.isArray(list) || list.length === 0 || list.length > CATALOG_MAX) return null;
+  const ctx = providerId === "autoclaw-cn"
+    ? { version: CATALOG_VERSION_CN, channel: "domestic" }
+    : { version: CATALOG_VERSION_INTL, channel: "overseas" };
+  const template = Object.values(given ?? {})[0];
+  const rows = {};
+  for (const raw of list) {
+    const entry = catalogEntry(raw);
+    // 一条不合规 → 整份丢弃（官方客户端也是这个行为）
+    if (!entry) return null;
+    if (rows[entry.id]) continue;
+    // 对话走 OpenAI chat/completions，Anthropic 协议的模型在这里用不了
+    if (entry.api === "anthropic-messages") continue;
+    if (gatedOut(entry.gates, ctx)) continue;
+    rows[entry.id] = catalogRow(entry, providerId, given?.[entry.id], template);
+  }
+  if (Object.keys(rows).length === 0) return null;
+  liveRouteIds.clear();
+  for (const id of Object.keys(rows)) liveRouteIds.add(id);
+  return rows;
+}
+
 /** 路由前缀表（剥前缀用；**顺序有意义**：先 `zaicoding_` 再 `zai_`）。 */
 const ROUTE_PREFIXES = ["zaicoding_", "zai_"];
 
@@ -165,6 +385,10 @@ function stripRoutePrefix(routeId) {
 function resolveRouteId(clientModel) {
   const name = String(clientModel ?? "").trim();
   if (!name) return "zai_auto";
+  // 0) 上游目录给出的 id **原样透传**：新模型（如 GLM-5.4）可能不带
+  //    `zai_` / `zaicoding_` 前缀，若走下面的「未知名字」分支会被静默
+  //    改写成 zai_auto —— 用户以为在用 5.4，实际跑的是自动路由。
+  if (liveRouteIds.has(name)) return name;
   const lower = name.toLowerCase();
 
   // 1) 路由 ID 本身（含大小写变体）：表里的 id 就是 routeId
@@ -1027,8 +1251,20 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
 
     provider: {
       id: providerId,
-      async models(provider) {
-        return provider.models;
+      /**
+       * 模型清单：**优先上游实时目录**，读不到才用静态表。
+       *
+       * 🔴 这是「拿不到 GLM-5.4」的修复点：旧实现只返回写死的 4 条 5.3，
+       * 上游后加的模型永远不会出现。现在按官方客户端的方式拉
+       * `/autoclaw-proxy/proxy/autoclaw-model-config`。
+       *
+       * 这里的 401 只表示「目录读不到」，**绝不**据此判登录失效 ——
+       * 登录态由 chat / usage / refresh 判定，模型列表没资格踢人下线。
+       */
+      async models(provider, { auth, signal } = {}) {
+        if (auth?.type !== "oauth" || !auth.access) return provider.models;
+        const live = await catalogModels(providerId, auth.access, provider.models, signal);
+        return live ?? provider.models;
       },
     },
   });
@@ -1737,6 +1973,9 @@ export const _internal = {
   claimInspirationCenter,
   CHAT_PATH, CN_HOST, PLATFORM_TM, USER_AGENT,
   acceptLocalCallback, startLocalOAuth, OAUTH_SESSION_TIMEOUT_MS,
+  // 上游模型目录（动态）
+  catalogUrl, catalogHeaders, catalogEntry, catalogRow, catalogModels,
+  gateHolds, gatedOut, versionCmp, liveRouteIds, CATALOG_PATH,
 };
 
 function remoteGuideHtml(vendor, deviceId) {

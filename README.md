@@ -24,13 +24,37 @@
 > `agent: "plugin:autoclaw-cn"`，如果插件不注册这个 provider，该账号在 `magpie providers` / `accounts` 里会**完全不可见**——
 > 等于白登录。（v0.9.1 之前就是这样，国内号一直是废着的。）
 
-支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan）：
+支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。
+
+### 模型清单是**动态**的（v0.9.9 起）
+
+登录后插件按官方客户端的方式向上游托管网关拉一份实时目录：
+
+```
+GET {host}/autoclaw-proxy/proxy/autoclaw-model-config
+→ { models: [ "id" | { id, name, api, reasoning, input,
+                       contextWindow, maxTokens, reasoningLevels,
+                       metadata: { gates } } ] }
+```
+
+- 上游新增的模型**不用等插件发版**就会出现在面板里（GLM-5.4 就是这样拿到的）
+- 按官方客户端的规则过滤：`anthropic-messages` 协议的跳过、`metadata.gates`
+  里 `hidden`/`disabled` 且条件成立的跳过
+- 目录请求伪装成官方客户端：国内 `X-Version: 2.1.0` / `X-Channel: AutoClaw26`，
+  国际 `2.0.3` / `official`
+- 读不到（未登录、网络失败、401、结构不合规）时回落到下面这份静态表，
+  行为与旧版完全一致；**目录 401 只表示读不到，绝不判登录失效**
+
+静态兜底表（带前缀的 routeModelId，`zai_` 智谱 / `zaicoding_` coding plan）：
 
 - `zai_auto` / `zai_auto-fast`（自动路由，推荐默认）
 - `zaicoding_glm-5.3`
 - `zai_glm-5.3-flash`
 
 > 旧表里的 `zai_glm-5-turbo`、`tdpsk_deepseek-v4-*` 上游已下架（实测 `400 非法模型`），已移除。
+>
+> 🔴 写死的表必然落后上游一版——这正是 v0.9.8 及之前「看不到 GLM-5.4」的原因：
+> 不是登录问题，也不是额度问题，是清单根本没往后端要过。
 
 ## 安装
 
@@ -125,7 +149,7 @@ echo '{ "signin": true, "signinHour": null, "signinOnUsage": false }' > ~/.confi
 ## 已知行为
 
 - 对话 fetch 已内置 401 自动换侧重试（**按账号归属排序**：国内号 CN 优先、国际号全球优先，两侧真互备）。**403 不当作登录失效**——上游 403 有 `forbidden`（平台绑定）、`pay-view/810001`（额度/高峰）、`810002`（限流）三种业务形态，原样透传给客户端。
-- 上游模型白名单随版本变化，模型下线时上游返回 `400 非法模型`（原样透传错误消息）。模型清单已按上游真实目录收敛为 4 个。
+- 上游模型白名单随版本变化，模型下线时上游返回 `400 非法模型`（原样透传错误消息）。模型清单从上游目录实时读取（v0.9.9），静态表只作兜底。
 - refresh token 与 AutoClaw 桌面端**共用会互踢**（双方都轮换），插件账号请勿同时在桌面端登录。
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。
 - **`device_id` 是 OAuth 的会话绑定键**：引导页调 `{vendor}-oauth-url` 与插件调 `{vendor}-oauth-login` 必须用同一个值。方式2 已由插件通过 `?device_id=` 透传；手工复制旧链接（或误用方式1 的页面）会导致 `631001 抱歉,登录失败,请重新尝试`。
